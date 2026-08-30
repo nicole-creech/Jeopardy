@@ -193,8 +193,40 @@
     resize: vertical;
   }
   .clue-editor input:focus, .clue-editor textarea:focus { outline: none; border-color: var(--gold); }
-  .image-drop {
+  .image-thumbs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
     margin-top: 4px;
+  }
+  .image-thumb {
+    position: relative;
+    width: 64px;
+    height: 64px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--card-border);
+  }
+  .image-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .image-thumb .thumb-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 18px;
+    height: 18px;
+    line-height: 16px;
+    text-align: center;
+    padding: 0;
+    background: rgba(180, 30, 35, 0.9);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .image-drop {
+    margin-top: 6px;
     border: 1px dashed var(--card-border);
     border-radius: 7px;
     padding: 10px;
@@ -207,18 +239,6 @@
   }
   .image-drop:hover { border-color: #4a56a8; }
   .image-drop:focus, .image-drop.dragover { border-color: var(--gold); color: var(--gold); background: rgba(255, 213, 74, 0.06); }
-  .image-drop img { max-width: 100%; max-height: 120px; display: block; margin: 0 auto 6px; border-radius: 5px; }
-  .image-drop .img-remove {
-    margin-top: 4px;
-    background: linear-gradient(180deg, var(--red), var(--red-dark));
-    color: white;
-    border: none;
-    border-radius: 5px;
-    padding: 4px 10px;
-    cursor: pointer;
-    font-size: 11px;
-    font-weight: 600;
-  }
   .image-drop input[type=file] { display: none; }
   .cat-editor .remove-cat {
     margin-top: 10px;
@@ -409,14 +429,21 @@
   @keyframes overlayIn { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: scale(1); } }
   #overlay.show { display: flex; }
   #overlayValue { font-family: 'Fredoka', sans-serif; color: var(--gold); font-size: 26px; margin-bottom: 20px; letter-spacing: 1px; }
-  #overlayImage {
-    max-width: 80%;
-    max-height: 45vh;
-    border-radius: 10px;
+  #overlayImages {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    justify-content: center;
+    max-width: 90%;
     margin-bottom: 24px;
-    display: none;
+  }
+  #overlayImages img {
+    max-width: 70vw;
+    max-height: 42vh;
+    border-radius: 10px;
     box-shadow: 0 10px 30px rgba(0,0,0,0.5);
   }
+  #overlayImages.hidden { display: none; }
   #overlayAnswer {
     color: var(--gold);
     font-family: 'Fredoka', sans-serif;
@@ -486,7 +513,7 @@
 <div id="overlay">
   <button id="closeOverlay">✕</button>
   <div id="overlayValue"></div>
-  <img id="overlayImage" />
+  <div id="overlayImages"></div>
   <div id="overlayAnswer"></div>
   <div id="overlayHint">Click anywhere to reveal the answer</div>
 </div>
@@ -564,8 +591,19 @@ document.getElementById('newGameBtn').addEventListener('click', () => {
 function blankCategory() {
   return {
     name: 'Category',
-    clues: VALUE_STEPS.map(v => ({ value: v, answer: '', image: null }))
+    clues: VALUE_STEPS.map(v => ({ value: v, answer: '', images: [] }))
   };
+}
+
+// Normalizes older save files (single "image" field) into the current "images" array shape
+function normalizeGame(game) {
+  game.categories.forEach(cat => {
+    cat.clues.forEach(clue => {
+      if (!Array.isArray(clue.images)) clue.images = clue.image ? [clue.image] : [];
+      delete clue.image;
+    });
+  });
+  return game;
 }
 
 // Resize/compress an image file/blob to a data URL so saved games stay a reasonable size
@@ -595,36 +633,58 @@ function fileToDataUrl(file, maxDim = 900, quality = 0.85) {
   });
 }
 
-// Builds a click-to-upload / paste-to-upload / drag-to-upload image well for one clue
-function buildImageDrop(clue, onChange) {
+// Builds a thumbnail strip + click/paste/drag uploader that can attach multiple images to one clue
+function buildImageDrop(clue) {
+  const wrap = document.createElement('div');
+
+  const thumbs = document.createElement('div');
+  thumbs.className = 'image-thumbs';
+  wrap.appendChild(thumbs);
+
   const drop = document.createElement('div');
   drop.className = 'image-drop';
   drop.tabIndex = 0;
+  drop.textContent = 'Click to upload, or paste (Ctrl+V) / drag image(s) here — add as many as you like';
 
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
   fileInput.accept = 'image/*';
+  fileInput.multiple = true;
   drop.appendChild(fileInput);
 
-  const applyFile = async (file) => {
-    if (!file || !file.type.startsWith('image/')) return;
-    clue.image = await fileToDataUrl(file);
-    renderClueImage(drop, clue);
-    if (onChange) onChange();
+  const renderThumbs = () => {
+    thumbs.innerHTML = '';
+    clue.images.forEach((src, idx) => {
+      const t = document.createElement('div');
+      t.className = 'image-thumb';
+      t.innerHTML = `<img src="${src}" /><button class="thumb-remove" title="Remove">✕</button>`;
+      t.querySelector('.thumb-remove').addEventListener('click', (e) => {
+        e.stopPropagation();
+        clue.images.splice(idx, 1);
+        renderThumbs();
+      });
+      thumbs.appendChild(t);
+    });
+  };
+
+  const applyFiles = async (files) => {
+    for (const file of files) {
+      if (!file || !file.type.startsWith('image/')) continue;
+      clue.images.push(await fileToDataUrl(file));
+    }
+    renderThumbs();
   };
 
   drop.addEventListener('click', (e) => {
     if (e.target === fileInput) return;
-    if (e.target.classList.contains('img-remove')) return;
     fileInput.click();
   });
-  fileInput.addEventListener('change', () => applyFile(fileInput.files[0]));
+  fileInput.addEventListener('change', () => { applyFiles([...fileInput.files]); fileInput.value = ''; });
 
   drop.addEventListener('paste', (e) => {
     const items = (e.clipboardData || window.clipboardData).items;
-    for (const item of items) {
-      if (item.type.startsWith('image/')) { applyFile(item.getAsFile()); e.preventDefault(); break; }
-    }
+    const files = [...items].filter(i => i.type.startsWith('image/')).map(i => i.getAsFile());
+    if (files.length) { applyFiles(files); e.preventDefault(); }
   });
 
   drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('dragover'); });
@@ -632,34 +692,12 @@ function buildImageDrop(clue, onChange) {
   drop.addEventListener('drop', (e) => {
     e.preventDefault();
     drop.classList.remove('dragover');
-    if (e.dataTransfer.files[0]) applyFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files.length) applyFiles([...e.dataTransfer.files]);
   });
 
-  renderClueImage(drop, clue);
-  return drop;
-}
-
-function renderClueImage(drop, clue) {
-  drop.querySelectorAll('img, .img-remove, .drop-label').forEach(el => el.remove());
-  if (clue.image) {
-    const img = document.createElement('img');
-    img.src = clue.image;
-    drop.prepend(img);
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'img-remove';
-    removeBtn.textContent = 'Remove image';
-    removeBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      clue.image = null;
-      renderClueImage(drop, clue);
-    });
-    drop.appendChild(removeBtn);
-  } else {
-    const label = document.createElement('div');
-    label.className = 'drop-label';
-    label.textContent = 'Click to upload, or paste (Ctrl+V) / drag an image here';
-    drop.prepend(label);
-  }
+  renderThumbs();
+  wrap.appendChild(drop);
+  return wrap;
 }
 
 document.getElementById('editorHome').addEventListener('click', () => { showView('homeView'); loadGameList(); });
@@ -673,7 +711,7 @@ async function editGame(name) {
 }
 
 function openEditor(game, originalName) {
-  editingGame = JSON.parse(JSON.stringify(game));
+  editingGame = normalizeGame(JSON.parse(JSON.stringify(game)));
   editingOriginalName = originalName;
   document.getElementById('gameTitleInput').value = editingGame.title || '';
   document.getElementById('gameNameInput').value = originalName || suggestFileName(editingGame.title);
@@ -705,8 +743,7 @@ function renderEditor() {
       `;
       ce.querySelector('input').addEventListener('input', e => { clue.answer = e.target.value; });
 
-      const drop = buildImageDrop(clue, () => renderClueImage(drop, clue));
-      ce.appendChild(drop);
+      ce.appendChild(buildImageDrop(clue));
       el.appendChild(ce);
     });
 
@@ -763,7 +800,7 @@ document.getElementById('playFromEditorBtn').addEventListener('click', async () 
 // ---------------- Board ----------------
 async function playGame(name) {
   const res = await fetch('/api/games/' + encodeURIComponent(name));
-  data = await res.json();
+  data = normalizeGame(await res.json());
   document.getElementById('boardTitle').textContent = data.title || 'Jeopardy';
   teams = [
     { name: 'Team 1', score: 0 },
@@ -815,9 +852,15 @@ function openClue(ci, ri, tileEl) {
   currentClue = { ci, ri, tileEl };
 
   document.getElementById('overlayValue').textContent = '$' + clue.value;
-  const imgEl = document.getElementById('overlayImage');
-  if (clue.image) { imgEl.src = clue.image; imgEl.style.display = 'block'; }
-  else { imgEl.style.display = 'none'; imgEl.removeAttribute('src'); }
+  const imagesEl = document.getElementById('overlayImages');
+  imagesEl.innerHTML = '';
+  const images = clue.images || [];
+  imagesEl.classList.toggle('hidden', images.length === 0);
+  images.forEach(src => {
+    const img = document.createElement('img');
+    img.src = src;
+    imagesEl.appendChild(img);
+  });
   const ansEl = document.getElementById('overlayAnswer');
   ansEl.style.display = 'none';
   ansEl.textContent = clue.answer;
