@@ -25,3 +25,15 @@ Then open **http://localhost:3000** in your browser.
 - **Board** — click a tile to show its value/images, click again to reveal the answer, then close it and award points to a team from the scoreboard at the bottom. Add/remove teams as needed.
 
 Games are saved as JSON files in the `games/` folder, so you can keep as many custom boards as you want and reuse them for future game nights.
+
+## Building a standalone .exe (no Node required to run it)
+
+If you want to hand this to someone (or run it yourself) without installing Node, you can package it into a Windows executable:
+
+```bash
+npm run build:exe
+```
+
+This produces `dist/CustomJeopardy.exe` alongside a `public/` and `games/` folder — copy the whole `dist/` folder wherever you like and double-click `CustomJeopardy.exe`. It opens `http://localhost:3000` in your default browser automatically, and any games you create are saved into that same `games/` folder next to the exe.
+
+Building the exe requires Node.js (for the one-time build step only) — the resulting `.exe` does not.

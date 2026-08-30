@@ -3,10 +3,13 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = 3000;
-const PUBLIC_DIR = path.join(__dirname, 'public');
-const GAMES_DIR = path.join(__dirname, 'games');
+// When packaged with pkg, __dirname points inside a virtual snapshot — use the
+// real exe's folder instead so public/ and games/ resolve to files on disk.
+const BASE_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
+const PUBLIC_DIR = path.join(BASE_DIR, 'public');
+const GAMES_DIR = path.join(BASE_DIR, 'games');
 
-if (!fs.existsSync(GAMES_DIR)) fs.mkdirSync(GAMES_DIR);
+if (!fs.existsSync(GAMES_DIR)) fs.mkdirSync(GAMES_DIR, { recursive: true });
 
 const MIME = {
   '.html': 'text/html',
@@ -106,5 +109,15 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Jeopardy board running at http://localhost:${PORT}`);
+  const url = `http://localhost:${PORT}`;
+  console.log(`Jeopardy board running at ${url}`);
+
+  // When double-clicked as a packaged exe, open the browser automatically
+  if (process.pkg) {
+    const { exec } = require('child_process');
+    const openCmd = process.platform === 'win32' ? `start "" "${url}"`
+      : process.platform === 'darwin' ? `open "${url}"`
+      : `xdg-open "${url}"`;
+    exec(openCmd);
+  }
 });

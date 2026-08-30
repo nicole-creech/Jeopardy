@@ -5,6 +5,10 @@
   "type": "commonjs",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build:exe": "node scripts/build-exe.js"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
   }
 }
