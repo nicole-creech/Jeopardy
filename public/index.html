@@ -449,9 +449,25 @@ async function loadGameList() {
     row.querySelector('.edit').addEventListener('click', () => editGame(name));
     const delBtn = row.querySelector('.del');
     if (delBtn) delBtn.addEventListener('click', async () => {
-      if (!confirm(`Delete "${name}"?`)) return;
-      await fetch('/api/games/' + encodeURIComponent(name), { method: 'DELETE' });
-      loadGameList();
+      if (delBtn.dataset.confirming === '1') {
+        delBtn.dataset.confirming = '0';
+        try {
+          const res = await fetch('/api/games/' + encodeURIComponent(name), { method: 'DELETE' });
+          if (!res.ok) {
+            const result = await res.json().catch(() => ({}));
+            alert(result.error || `Failed to delete "${name}" (status ${res.status}).`);
+          }
+        } catch (err) {
+          alert(`Failed to delete "${name}": ${err.message}`);
+        }
+        loadGameList();
+      } else {
+        delBtn.dataset.confirming = '1';
+        delBtn.textContent = 'Confirm?';
+        setTimeout(() => {
+          if (delBtn.isConnected) { delBtn.dataset.confirming = '0'; delBtn.textContent = 'Delete'; }
+        }, 3000);
+      }
     });
     list.appendChild(row);
   });
