@@ -1,0 +1,55 @@
+{
+  "title": "Custom Jeopardy",
+  "categories": [
+    {
+      "name": "Video Games",
+      "clues": [
+        { "value": 200, "clue": "This plumber's brother is named Luigi.", "answer": "Who is Mario?" },
+        { "value": 400, "clue": "This 2011 sandbox game is made almost entirely of cubes.", "answer": "What is Minecraft?" },
+        { "value": 600, "clue": "This company makes the PlayStation console.", "answer": "What is Sony?" },
+        { "value": 800, "clue": "This green-clad hero explores Hyrule.", "answer": "Who is Link?" },
+        { "value": 1000, "clue": "This battle royale game features a bus dropping players onto an island.", "answer": "What is Fortnite?" }
+      ]
+    },
+    {
+      "name": "Movies",
+      "clues": [
+        { "value": 200, "clue": "This 1997 James Cameron film starred Leonardo DiCaprio and Kate Winslet on a sinking ship.", "answer": "What is Titanic?" },
+        { "value": 400, "clue": "This wizarding franchise is based on books by J.K. Rowling.", "answer": "What is Harry Potter?" },
+        { "value": 600, "clue": "This Pixar film is about a rat who wants to be a chef.", "answer": "What is Ratatouille?" },
+        { "value": 800, "clue": "This trilogy follows Frodo Baggins on a quest to destroy a ring.", "answer": "What is The Lord of the Rings?" },
+        { "value": 1000, "clue": "This 2010 film explores dreams within dreams and stars Leonardo DiCaprio.", "answer": "What is Inception?" }
+      ]
+    },
+    {
+      "name": "Science",
+      "clues": [
+        { "value": 200, "clue": "This is the chemical symbol for water.", "answer": "What is H2O?" },
+        { "value": 400, "clue": "This planet is known as the Red Planet.", "answer": "What is Mars?" },
+        { "value": 600, "clue": "This force pulls objects toward the center of the Earth.", "answer": "What is gravity?" },
+        { "value": 800, "clue": "This organelle is known as the powerhouse of the cell.", "answer": "What is the mitochondria?" },
+        { "value": 1000, "clue": "This scientist developed the theory of general relativity.", "answer": "Who is Albert Einstein?" }
+      ]
+    },
+    {
+      "name": "History",
+      "clues": [
+        { "value": 200, "clue": "This document begins 'We hold these truths to be self-evident...'", "answer": "What is the Declaration of Independence?" },
+        { "value": 400, "clue": "This wall fell in 1989, symbolizing the end of the Cold War divide.", "answer": "What is the Berlin Wall?" },
+        { "value": 600, "clue": "This Egyptian queen was known for her relationships with Julius Caesar and Mark Antony.", "answer": "Who is Cleopatra?" },
+        { "value": 800, "clue": "This war lasted from 1939 to 1945.", "answer": "What is World War II?" },
+        { "value": 1000, "clue": "This ship famously sank on its maiden voyage in 1912.", "answer": "What is the Titanic?" }
+      ]
+    },
+    {
+      "name": "Random Trivia",
+      "clues": [
+        { "value": 200, "clue": "This is the only mammal capable of true flight.", "answer": "What is a bat?" },
+        { "value": 400, "clue": "This many strings does a standard guitar have.", "answer": "What is six?" },
+        { "value": 600, "clue": "This country gifted the Statue of Liberty to the United States.", "answer": "What is France?" },
+        { "value": 800, "clue": "This is the largest ocean on Earth.", "answer": "What is the Pacific Ocean?" },
+        { "value": 1000, "clue": "This is the smallest prime number.", "answer": "What is two?" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,800 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Jeopardy</title>
+<style>
+  :root {
+    --board-blue: #060ce9;
+    --tile-blue: #0a1791;
+    --gold: #ffcc00;
+    --bg: #000;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: white;
+    font-family: 'Arial Narrow', Arial, sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  .hidden { display: none !important; }
+
+  /* ---------- Home / menu screen ---------- */
+  #homeView {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    padding: 40px;
+  }
+  #homeView h1 {
+    color: var(--gold);
+    font-size: 42px;
+    letter-spacing: 2px;
+    margin: 0;
+  }
+  .home-actions { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
+  .big-btn {
+    background: var(--tile-blue);
+    color: white;
+    border: 2px solid var(--gold);
+    padding: 16px 28px;
+    font-size: 18px;
+    font-weight: bold;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .big-btn:hover { background: var(--board-blue); }
+  #gameList {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    max-width: 480px;
+  }
+  .game-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 10px 14px;
+  }
+  .game-row .gname { font-weight: bold; }
+  .game-row .row-actions { display: flex; gap: 8px; }
+  .game-row button {
+    padding: 6px 12px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+  }
+  .game-row .play { background: #2e7d32; color: white; }
+  .game-row .edit { background: #555; color: white; }
+  .game-row .del { background: #c62828; color: white; }
+
+  /* ---------- Editor screen ---------- */
+  #editorView {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #editorHeader {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px;
+    background: #111;
+    flex-wrap: wrap;
+  }
+  #editorHeader input#gameNameInput,
+  #editorHeader input#gameTitleInput {
+    background: #222;
+    color: white;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 8px;
+    font-size: 14px;
+  }
+  #editorBody {
+    flex: 1;
+    overflow: auto;
+    padding: 16px 20px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+  }
+  .cat-editor {
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 10px;
+  }
+  .cat-editor input.catname {
+    width: 100%;
+    background: #222;
+    color: var(--gold);
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 6px;
+    font-weight: bold;
+    margin-bottom: 8px;
+  }
+  .clue-editor {
+    border-top: 1px solid #292929;
+    padding-top: 6px;
+    margin-top: 6px;
+  }
+  .clue-editor label { font-size: 11px; color: #999; display: block; margin-top: 4px; }
+  .clue-editor input, .clue-editor textarea {
+    width: 100%;
+    background: #1a1a1a;
+    color: white;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 5px;
+    font-size: 13px;
+    resize: vertical;
+  }
+  .image-drop {
+    margin-top: 4px;
+    border: 1px dashed #444;
+    border-radius: 4px;
+    padding: 8px;
+    text-align: center;
+    font-size: 11px;
+    color: #777;
+    cursor: pointer;
+    outline: none;
+  }
+  .image-drop:focus, .image-drop.dragover { border-color: var(--gold); color: var(--gold); }
+  .image-drop img { max-width: 100%; max-height: 120px; display: block; margin: 0 auto 4px; border-radius: 3px; }
+  .image-drop .img-remove {
+    margin-top: 4px;
+    background: #c62828;
+    color: white;
+    border: none;
+    border-radius: 3px;
+    padding: 3px 8px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .image-drop input[type=file] { display: none; }
+  .cat-editor .remove-cat {
+    margin-top: 8px;
+    width: 100%;
+    background: #333;
+    color: #aaa;
+    border: none;
+    border-radius: 4px;
+    padding: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  #addCatBtn {
+    align-self: flex-start;
+    height: fit-content;
+    background: transparent;
+    border: 2px dashed #444;
+    color: #888;
+    border-radius: 8px;
+    cursor: pointer;
+    min-height: 120px;
+  }
+
+  /* ---------- Board screen ---------- */
+  #boardView { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  #topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background: #111;
+  }
+  #topbar .gtitle { color: var(--gold); font-weight: bold; letter-spacing: 1px; }
+  #topbar button {
+    background: #333;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+  #board {
+    flex: 1;
+    display: grid;
+    grid-template-rows: auto repeat(5, 1fr);
+    gap: 6px;
+    padding: 10px;
+    background: var(--board-blue);
+    min-height: 0;
+  }
+  .row { display: grid; grid-template-columns: repeat(var(--cols, 5), 1fr); gap: 6px; }
+  .cat {
+    background: var(--tile-blue);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-weight: bold;
+    text-transform: uppercase;
+    padding: 8px;
+    font-size: 1.1vw;
+    border-radius: 4px;
+  }
+  .tile {
+    background: var(--tile-blue);
+    color: var(--gold);
+    font-size: 2.2vw;
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border-radius: 4px;
+    border: 2px solid #1c2bb8;
+    user-select: none;
+  }
+  .tile:hover { filter: brightness(1.2); }
+  .tile.used { background: #050830; color: #333; cursor: default; }
+  .tile.used:hover { filter: none; }
+  .tile.empty { visibility: hidden; }
+
+  #scoreboard {
+    display: flex;
+    gap: 8px;
+    padding: 10px;
+    background: #111;
+    overflow-x: auto;
+    align-items: center;
+  }
+  .team {
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 8px 12px;
+    min-width: 150px;
+    flex-shrink: 0;
+  }
+  .team input.name {
+    background: transparent;
+    border: none;
+    color: white;
+    font-weight: bold;
+    font-size: 14px;
+    width: 100%;
+    margin-bottom: 4px;
+  }
+  .team .score {
+    font-size: 22px;
+    font-weight: bold;
+    color: var(--gold);
+    text-align: center;
+    margin-bottom: 4px;
+  }
+  .team .btns { display: flex; gap: 4px; justify-content: center; }
+  .team button {
+    flex: 1;
+    padding: 4px;
+    cursor: pointer;
+    border: none;
+    border-radius: 3px;
+    font-weight: bold;
+  }
+  .team .plus { background: #2e7d32; color: white; }
+  .team .minus { background: #c62828; color: white; }
+  .team .remove {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    background: #333;
+    color: #aaa;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  #addTeamBtn {
+    background: var(--gold);
+    color: #000;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-weight: bold;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  #overlay {
+    position: fixed;
+    inset: 0;
+    background: var(--board-blue);
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 40px;
+    z-index: 10;
+  }
+  #overlay.show { display: flex; }
+  #overlayValue { color: var(--gold); font-size: 24px; margin-bottom: 20px; }
+  #overlayText {
+    font-size: 4vw;
+    font-weight: bold;
+    text-transform: uppercase;
+    max-width: 90%;
+    line-height: 1.3;
+  }
+  #overlayImage {
+    max-width: 80%;
+    max-height: 45vh;
+    border-radius: 6px;
+    margin-bottom: 20px;
+    display: none;
+  }
+  #overlayAnswer {
+    color: var(--gold);
+    font-size: 3vw;
+    font-weight: bold;
+    margin-top: 30px;
+    display: none;
+  }
+  #overlayHint {
+    margin-top: 40px;
+    color: #99a3ff;
+    font-size: 14px;
+  }
+  #closeOverlay {
+    position: absolute;
+    top: 20px;
+    right: 30px;
+    background: transparent;
+    border: 2px solid white;
+    color: white;
+    border-radius: 50%;
+    width: 36px;
+    height: 36px;
+    cursor: pointer;
+    font-size: 18px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== HOME ===== -->
+<div id="homeView">
+  <h1>🟦 Jeopardy</h1>
+  <div class="home-actions">
+    <button class="big-btn" id="newGameBtn">+ New Game</button>
+  </div>
+  <div id="gameList"></div>
+</div>
+
+<!-- ===== EDITOR ===== -->
+<div id="editorView" class="hidden">
+  <div id="editorHeader">
+    <button id="editorHome">← Menu</button>
+    <input id="gameTitleInput" placeholder="Board title (e.g. Friday Trivia)" />
+    <input id="gameNameInput" placeholder="save-as-filename (letters/numbers/-/_)" />
+    <button id="saveGameBtn" class="big-btn" style="padding:8px 16px;font-size:14px;">Save Game</button>
+    <button id="playFromEditorBtn" class="big-btn" style="padding:8px 16px;font-size:14px;">Save &amp; Play</button>
+  </div>
+  <div id="editorBody"></div>
+</div>
+
+<!-- ===== BOARD ===== -->
+<div id="boardView" class="hidden">
+  <div id="topbar">
+    <button id="boardHome">← Menu</button>
+    <div class="gtitle" id="boardTitle"></div>
+    <div></div>
+  </div>
+  <div id="board"></div>
+  <div id="scoreboard"></div>
+  <button id="addTeamBtn">+ Add Team</button>
+</div>
+
+<div id="overlay">
+  <button id="closeOverlay">✕</button>
+  <div id="overlayValue"></div>
+  <img id="overlayImage" />
+  <div id="overlayText"></div>
+  <div id="overlayAnswer"></div>
+  <div id="overlayHint">Click anywhere to reveal the answer</div>
+</div>
+
+<script>
+const NUM_CLUES_DEFAULT = 5;
+const VALUE_STEPS = [200, 400, 600, 800, 1000];
+
+let data = null;          // currently loaded/played game
+let teams = [];
+let currentClue = null;   // {ci, ri, tileEl}
+let editingGame = null;   // in-memory game object being edited
+let editingOriginalName = null;
+
+// ---------------- View switching ----------------
+function showView(id) {
+  ['homeView', 'editorView', 'boardView'].forEach(v => {
+    document.getElementById(v).classList.toggle('hidden', v !== id);
+  });
+}
+
+// ---------------- Home ----------------
+async function loadGameList() {
+  const res = await fetch('/api/games');
+  const names = await res.json();
+  const list = document.getElementById('gameList');
+  list.innerHTML = '';
+  names.forEach(name => {
+    const row = document.createElement('div');
+    row.className = 'game-row';
+    row.innerHTML = `
+      <span class="gname">${escapeHtml(name)}</span>
+      <span class="row-actions">
+        <button class="play">Play</button>
+        <button class="edit">Edit</button>
+        ${name === 'template' ? '' : '<button class="del">Delete</button>'}
+      </span>
+    `;
+    row.querySelector('.play').addEventListener('click', () => playGame(name));
+    row.querySelector('.edit').addEventListener('click', () => editGame(name));
+    const delBtn = row.querySelector('.del');
+    if (delBtn) delBtn.addEventListener('click', async () => {
+      if (!confirm(`Delete "${name}"?`)) return;
+      await fetch('/api/games/' + encodeURIComponent(name), { method: 'DELETE' });
+      loadGameList();
+    });
+    list.appendChild(row);
+  });
+}
+
+document.getElementById('newGameBtn').addEventListener('click', () => {
+  const blank = {
+    title: 'New Jeopardy Game',
+    categories: Array.from({ length: 5 }, () => blankCategory())
+  };
+  openEditor(blank, null);
+});
+
+function blankCategory() {
+  return {
+    name: 'Category',
+    clues: VALUE_STEPS.map(v => ({ value: v, clue: '', answer: '', image: null }))
+  };
+}
+
+// Resize/compress an image file/blob to a data URL so saved games stay a reasonable size
+function fileToDataUrl(file, maxDim = 900, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = () => {
+      img.onerror = reject;
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          const scale = maxDim / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// Builds a click-to-upload / paste-to-upload / drag-to-upload image well for one clue
+function buildImageDrop(clue, onChange) {
+  const drop = document.createElement('div');
+  drop.className = 'image-drop';
+  drop.tabIndex = 0;
+
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/*';
+  drop.appendChild(fileInput);
+
+  const applyFile = async (file) => {
+    if (!file || !file.type.startsWith('image/')) return;
+    clue.image = await fileToDataUrl(file);
+    renderClueImage(drop, clue);
+    if (onChange) onChange();
+  };
+
+  drop.addEventListener('click', (e) => {
+    if (e.target === fileInput) return;
+    if (e.target.classList.contains('img-remove')) return;
+    fileInput.click();
+  });
+  fileInput.addEventListener('change', () => applyFile(fileInput.files[0]));
+
+  drop.addEventListener('paste', (e) => {
+    const items = (e.clipboardData || window.clipboardData).items;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) { applyFile(item.getAsFile()); e.preventDefault(); break; }
+    }
+  });
+
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('dragover'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    drop.classList.remove('dragover');
+    if (e.dataTransfer.files[0]) applyFile(e.dataTransfer.files[0]);
+  });
+
+  renderClueImage(drop, clue);
+  return drop;
+}
+
+function renderClueImage(drop, clue) {
+  drop.querySelectorAll('img, .img-remove, .drop-label').forEach(el => el.remove());
+  if (clue.image) {
+    const img = document.createElement('img');
+    img.src = clue.image;
+    drop.prepend(img);
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'img-remove';
+    removeBtn.textContent = 'Remove image';
+    removeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      clue.image = null;
+      renderClueImage(drop, clue);
+    });
+    drop.appendChild(removeBtn);
+  } else {
+    const label = document.createElement('div');
+    label.className = 'drop-label';
+    label.textContent = 'Click to upload, or paste (Ctrl+V) / drag an image here';
+    drop.prepend(label);
+  }
+}
+
+document.getElementById('editorHome').addEventListener('click', () => { showView('homeView'); loadGameList(); });
+document.getElementById('boardHome').addEventListener('click', () => { showView('homeView'); loadGameList(); });
+
+// ---------------- Editor ----------------
+async function editGame(name) {
+  const res = await fetch('/api/games/' + encodeURIComponent(name));
+  const game = await res.json();
+  openEditor(game, name);
+}
+
+function openEditor(game, originalName) {
+  editingGame = JSON.parse(JSON.stringify(game));
+  editingOriginalName = originalName;
+  document.getElementById('gameTitleInput').value = editingGame.title || '';
+  document.getElementById('gameNameInput').value = originalName || suggestFileName(editingGame.title);
+  renderEditor();
+  showView('editorView');
+}
+
+function suggestFileName(title) {
+  return (title || 'game').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'game';
+}
+
+function renderEditor() {
+  const body = document.getElementById('editorBody');
+  body.innerHTML = '';
+  editingGame.categories.forEach((cat, ci) => {
+    const el = document.createElement('div');
+    el.className = 'cat-editor';
+    el.innerHTML = `<input class="catname" value="${escapeHtml(cat.name)}" placeholder="Category name" />`;
+    el.querySelector('.catname').addEventListener('input', e => { cat.name = e.target.value; });
+
+    cat.clues.forEach((clue, ri) => {
+      const ce = document.createElement('div');
+      ce.className = 'clue-editor';
+      ce.innerHTML = `
+        <label>Value $${clue.value}</label>
+        <textarea rows="2" placeholder="Clue text">${escapeHtml(clue.clue)}</textarea>
+        <label>Answer</label>
+        <input type="text" value="${escapeHtml(clue.answer)}" placeholder="What is...?" />
+        <label>Image (optional)</label>
+      `;
+      ce.querySelector('textarea').addEventListener('input', e => { clue.clue = e.target.value; });
+      ce.querySelector('input').addEventListener('input', e => { clue.answer = e.target.value; });
+
+      const drop = buildImageDrop(clue, () => renderClueImage(drop, clue));
+      ce.appendChild(drop);
+      el.appendChild(ce);
+    });
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove-cat';
+    removeBtn.textContent = 'Remove category';
+    removeBtn.addEventListener('click', () => {
+      editingGame.categories.splice(ci, 1);
+      renderEditor();
+    });
+    el.appendChild(removeBtn);
+
+    body.appendChild(el);
+  });
+
+  const addBtn = document.createElement('button');
+  addBtn.id = 'addCatBtn';
+  addBtn.textContent = '+ Add Category';
+  addBtn.addEventListener('click', () => {
+    editingGame.categories.push(blankCategory());
+    renderEditor();
+  });
+  body.appendChild(addBtn);
+}
+
+document.getElementById('gameTitleInput').addEventListener('input', e => {
+  editingGame.title = e.target.value;
+});
+
+async function persistEditingGame() {
+  const name = document.getElementById('gameNameInput').value.trim();
+  if (!name) { alert('Enter a filename to save as.'); return null; }
+  editingGame.title = document.getElementById('gameTitleInput').value || 'Jeopardy';
+  const res = await fetch('/api/games', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, game: editingGame })
+  });
+  const result = await res.json();
+  if (!res.ok) { alert(result.error || 'Failed to save'); return null; }
+  return result.name;
+}
+
+document.getElementById('saveGameBtn').addEventListener('click', async () => {
+  const name = await persistEditingGame();
+  if (name) { showView('homeView'); loadGameList(); }
+});
+
+document.getElementById('playFromEditorBtn').addEventListener('click', async () => {
+  const name = await persistEditingGame();
+  if (name) playGame(name);
+});
+
+// ---------------- Board ----------------
+async function playGame(name) {
+  const res = await fetch('/api/games/' + encodeURIComponent(name));
+  data = await res.json();
+  document.getElementById('boardTitle').textContent = data.title || 'Jeopardy';
+  teams = [
+    { name: 'Team 1', score: 0 },
+    { name: 'Team 2', score: 0 }
+  ];
+  renderBoard();
+  renderScoreboard();
+  showView('boardView');
+}
+
+function renderBoard() {
+  const board = document.getElementById('board');
+  board.style.setProperty('--cols', data.categories.length);
+  board.innerHTML = '';
+
+  const catRow = document.createElement('div');
+  catRow.className = 'row';
+  data.categories.forEach(cat => {
+    const el = document.createElement('div');
+    el.className = 'cat';
+    el.textContent = cat.name;
+    catRow.appendChild(el);
+  });
+  board.appendChild(catRow);
+
+  const numClues = Math.max(...data.categories.map(c => c.clues.length));
+  for (let r = 0; r < numClues; r++) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    data.categories.forEach((cat, ci) => {
+      const clue = cat.clues[r];
+      const tile = document.createElement('div');
+      tile.className = 'tile';
+      if (clue) {
+        tile.textContent = '$' + clue.value;
+        tile.addEventListener('click', () => openClue(ci, r, tile));
+      } else {
+        tile.classList.add('empty');
+      }
+      row.appendChild(tile);
+    });
+    board.appendChild(row);
+  }
+}
+
+function openClue(ci, ri, tileEl) {
+  if (tileEl.classList.contains('used')) return;
+  const clue = data.categories[ci].clues[ri];
+  currentClue = { ci, ri, tileEl };
+
+  document.getElementById('overlayValue').textContent = '$' + clue.value;
+  document.getElementById('overlayText').textContent = clue.clue;
+  const imgEl = document.getElementById('overlayImage');
+  if (clue.image) { imgEl.src = clue.image; imgEl.style.display = 'block'; }
+  else { imgEl.style.display = 'none'; imgEl.removeAttribute('src'); }
+  const ansEl = document.getElementById('overlayAnswer');
+  ansEl.style.display = 'none';
+  ansEl.textContent = clue.answer;
+  document.getElementById('overlayHint').style.display = 'block';
+
+  document.getElementById('overlay').classList.add('show');
+}
+
+document.getElementById('overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'closeOverlay') return;
+  const ansEl = document.getElementById('overlayAnswer');
+  if (ansEl.style.display !== 'block') {
+    ansEl.style.display = 'block';
+    document.getElementById('overlayHint').style.display = 'none';
+  }
+});
+
+document.getElementById('closeOverlay').addEventListener('click', () => {
+  if (currentClue) {
+    currentClue.tileEl.classList.add('used');
+    currentClue.tileEl.textContent = '';
+  }
+  document.getElementById('overlay').classList.remove('show');
+  currentClue = null;
+});
+
+function renderScoreboard() {
+  const board = document.getElementById('scoreboard');
+  board.innerHTML = '';
+  teams.forEach((team, idx) => {
+    const el = document.createElement('div');
+    el.className = 'team';
+    el.innerHTML = `
+      <input class="name" value="${escapeHtml(team.name)}" />
+      <div class="score">${team.score}</div>
+      <div class="btns">
+        <button class="minus">-200</button>
+        <button class="plus">+200</button>
+      </div>
+      <button class="remove">remove</button>
+    `;
+    el.querySelector('.name').addEventListener('input', (e) => {
+      teams[idx].name = e.target.value;
+    });
+    el.querySelector('.plus').addEventListener('click', () => {
+      teams[idx].score += currentClue ? data.categories[currentClue.ci].clues[currentClue.ri].value : 200;
+      renderScoreboard();
+    });
+    el.querySelector('.minus').addEventListener('click', () => {
+      teams[idx].score -= currentClue ? data.categories[currentClue.ci].clues[currentClue.ri].value : 200;
+      renderScoreboard();
+    });
+    el.querySelector('.remove').addEventListener('click', () => {
+      teams.splice(idx, 1);
+      renderScoreboard();
+    });
+    board.appendChild(el);
+  });
+}
+
+document.getElementById('addTeamBtn').addEventListener('click', () => {
+  teams.push({ name: 'Team ' + (teams.length + 1), score: 0 });
+  renderScoreboard();
+});
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+loadGameList();
+</script>
+</body>
+</html>
