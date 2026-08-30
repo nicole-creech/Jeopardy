@@ -193,6 +193,39 @@
     resize: vertical;
   }
   .clue-editor input:focus, .clue-editor textarea:focus { outline: none; border-color: var(--gold); }
+  .clue-row-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .clue-row-head .clue-value { width: 90px; }
+  .remove-row {
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 2px;
+    white-space: nowrap;
+    transition: color 0.15s ease;
+  }
+  .remove-row:hover { color: var(--red); }
+  .add-row {
+    width: 100%;
+    margin-top: 10px;
+    background: transparent;
+    border: 1px dashed var(--card-border);
+    color: var(--muted);
+    border-radius: 7px;
+    padding: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+  .add-row:hover { border-color: var(--gold); color: var(--gold); }
   .image-thumbs {
     display: flex;
     flex-wrap: wrap;
@@ -736,16 +769,39 @@ function renderEditor() {
       const ce = document.createElement('div');
       ce.className = 'clue-editor';
       ce.innerHTML = `
-        <label>Value $${clue.value}</label>
+        <div class="clue-row-head">
+          <div>
+            <label>Value</label>
+            <input class="clue-value" type="number" step="100" value="${clue.value}" />
+          </div>
+          <button class="remove-row" title="Remove row">✕ Remove row</button>
+        </div>
         <label>Answer</label>
         <input type="text" value="${escapeHtml(clue.answer)}" placeholder="What is...?" />
         <label>Image (optional)</label>
       `;
-      ce.querySelector('input').addEventListener('input', e => { clue.answer = e.target.value; });
+      ce.querySelector('.clue-value').addEventListener('input', e => {
+        clue.value = parseInt(e.target.value, 10) || 0;
+      });
+      ce.querySelector('input[type=text]').addEventListener('input', e => { clue.answer = e.target.value; });
+      ce.querySelector('.remove-row').addEventListener('click', () => {
+        cat.clues.splice(ri, 1);
+        renderEditor();
+      });
 
       ce.appendChild(buildImageDrop(clue));
       el.appendChild(ce);
     });
+
+    const addRowBtn = document.createElement('button');
+    addRowBtn.className = 'add-row';
+    addRowBtn.textContent = '+ Add row';
+    addRowBtn.addEventListener('click', () => {
+      const lastValue = cat.clues.length ? cat.clues[cat.clues.length - 1].value : 0;
+      cat.clues.push({ value: lastValue + 200, answer: '', images: [] });
+      renderEditor();
+    });
+    el.appendChild(addRowBtn);
 
     const removeBtn = document.createElement('button');
     removeBtn.className = 'remove-cat';
