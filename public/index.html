@@ -39,6 +39,80 @@
   ::selection { background: var(--gold); color: #111; }
   button { font-family: inherit; }
 
+  #connDot {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--muted);
+    background: rgba(0,0,0,0.3);
+    padding: 4px 10px 4px 8px;
+    border-radius: 20px;
+    z-index: 30;
+  }
+  #connDot .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: background 0.2s ease; }
+  #connDot.connected .dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  #connDot.reconnecting .dot { background: var(--gold); box-shadow: 0 0 6px var(--gold); animation: connPulse 1s ease-in-out infinite; }
+  #connDot.disconnected .dot { background: var(--red); box-shadow: 0 0 6px var(--red); }
+  @keyframes connPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  .avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    min-width: 22px;
+    border-radius: 50%;
+    font-family: 'Fredoka', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    color: white;
+    margin-right: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.35);
+  }
+
+  #hostBuzzTimer {
+    font-family: 'Fredoka', sans-serif;
+    font-size: 15px;
+    color: var(--gold);
+    min-height: 20px;
+    margin-top: 4px;
+  }
+  #hostBuzzTimer.low { color: var(--red); }
+  #buzzTimeoutNote {
+    font-family: 'Fredoka', sans-serif;
+    color: var(--muted);
+    font-size: 15px;
+    margin-top: 10px;
+  }
+
+  #undoBar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    justify-content: center;
+    padding: 6px 14px;
+    background: rgba(255,213,74,0.08);
+    border-bottom: 1px solid var(--card-border);
+    font-size: 13px;
+    color: var(--muted);
+  }
+  #undoBar button {
+    background: #3a4384;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  #undoBar button:hover { filter: brightness(1.2); }
+
   /* ---------- Host login ---------- */
   #hostLoginView {
     flex: 1;
@@ -717,6 +791,8 @@
 </head>
 <body>
 
+<div id="connDot"><span class="dot"></span><span id="connDotText">offline</span></div>
+
 <!-- ===== HOST LOGIN ===== -->
 <div id="hostLoginView">
   <h1>🟦 Jeopardy</h1>
@@ -763,6 +839,10 @@
     <div class="gtitle" id="boardTitle"></div>
     <div></div>
   </div>
+  <div id="undoBar" class="hidden">
+    <span id="undoBarText"></span>
+    <button id="undoBarBtn" type="button">Undo</button>
+  </div>
   <div id="board"></div>
   <div id="scoreboard"></div>
 </div>
@@ -791,6 +871,8 @@
     <div id="overlayAnswer"></div>
     <div id="overlayAnswerImages" class="hidden"></div>
     <div id="overlayHint">Click anywhere to reveal the answer</div>
+    <div id="hostBuzzTimer"></div>
+    <div id="buzzTimeoutNote" class="hidden">⏱ Time's up — nobody buzzed in.</div>
     <div id="buzzPanel"></div>
     <div id="buzzJudge" class="hidden">
       <div id="buzzWinner"></div>
@@ -820,6 +902,75 @@ let usedClueIds = new Set(); // server's record of which clues are already used,
 let currentGameName = null;  // name of the game currently loaded on the board
 let pendingHostClueState = null; // buzz/DD state for a clue that's already open, waiting on `data` to load after reconnect
 let lastBuzzLog = null;      // most recent buzz_log payload — re-applied after a reconnect rebuild clobbers the panel
+let lastLiveWinnerId = null; // tracks buzz-in transitions so the host's "someone buzzed" sound plays once, not on every re-render
+
+const HOST_BUZZ_WINDOW_MS = 8000; // mirrors server's BUZZ_WINDOW_MS — used for the host's own optimistic countdown display
+const MAX_RECONNECT_ATTEMPTS = 8;
+let hostToken = null;
+let hostEnteredApp = false; // true once we've shown room info / left the login screen — a later reconnect must not reset the view
+let hostReconnectAttempts = 0;
+let hostReconnectHandle = null;
+
+const connDot = document.getElementById('connDot');
+const connDotText = document.getElementById('connDotText');
+function setConnDot(state, text) {
+  connDot.className = state;
+  connDotText.textContent = text;
+}
+
+// Simple Web Audio beep — no asset files needed, unlocked by the Create Game click.
+let audioCtx = null;
+function beep(freq, dur, type) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + dur);
+  } catch (e) { /* audio unsupported/blocked — silently skip */ }
+}
+function playHostBuzzSound() { beep(660, 0.12, 'square'); }
+
+// Stable per-player color so the same person keeps the same avatar color across the game.
+const AVATAR_COLORS = ['#e5484d', '#f2994a', '#e0b93c', '#27ae60', '#2d9cdb', '#9b51e0', '#eb5ea8', '#00b8a9', '#5c7cfa', '#f2542d'];
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+function avatarHtml(name) {
+  const clean = (name || '').trim();
+  const letter = clean ? clean.charAt(0).toUpperCase() : '?';
+  const color = AVATAR_COLORS[hashStr(clean.toLowerCase()) % AVATAR_COLORS.length];
+  return `<span class="avatar" style="background:${color}">${escapeHtml(letter)}</span>`;
+}
+
+let hostBuzzTimerInterval = null;
+function startHostCountdown(endsAt) {
+  stopHostCountdown();
+  const el = document.getElementById('hostBuzzTimer');
+  const tick = () => {
+    const remain = endsAt - Date.now();
+    if (remain <= 0) { stopHostCountdown(); return; }
+    const secs = Math.ceil(remain / 1000);
+    el.textContent = `⏱ ${secs}s`;
+    el.classList.toggle('low', secs <= 3);
+  };
+  tick();
+  hostBuzzTimerInterval = setInterval(tick, 200);
+}
+function stopHostCountdown() {
+  if (hostBuzzTimerInterval) clearInterval(hostBuzzTimerInterval);
+  hostBuzzTimerInterval = null;
+  const el = document.getElementById('hostBuzzTimer');
+  if (el) { el.textContent = ''; el.classList.remove('low'); }
+}
 
 // ---------------- View switching ----------------
 function showView(id) {
@@ -848,10 +999,11 @@ async function createGame() {
     const result = await res.json();
     if (!res.ok) { errEl.textContent = result.error || 'Could not create game'; return; }
     try { localStorage.setItem(HOST_SESSION_KEY, JSON.stringify({ token: result.token, roomCode: result.roomCode })); } catch (e) {}
-    connectWs(result.token);
     showRoomInfo(result.roomCode);
     showView('homeView');
     loadGameList();
+    hostEnteredApp = true; // a freshly-created room is known-good — no need to gate the UI on the socket actually opening
+    connectWs(result.token);
   } catch (err) {
     errEl.textContent = 'Could not reach server';
   }
@@ -864,22 +1016,55 @@ function tryResumeHostSession() {
   let saved;
   try { saved = JSON.parse(localStorage.getItem(HOST_SESSION_KEY) || 'null'); } catch (e) { saved = null; }
   if (!saved || !saved.token) return;
-
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const probe = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(saved.token)}`);
-  let settled = false;
-
-  probe.addEventListener('open', () => {
-    settled = true;
-    ws = probe;
-    attachWsMessageHandler(ws);
+  connectWs(saved.token, () => {
     showRoomInfo(saved.roomCode);
     showView('homeView');
     loadGameList();
   });
-  probe.addEventListener('close', () => {
-    if (settled) return; // a later, unrelated close — the real session, not this probe attempt
-    try { localStorage.removeItem(HOST_SESSION_KEY); } catch (e) {}
+}
+
+// Opens the host's realtime connection and keeps it open — an unexpected drop (wifi
+// blip, laptop sleep) retries with backoff instead of stranding the host on a dead
+// socket mid-game. `onFirstOpen` only fires once, the first time this page session
+// establishes a connection — a later reconnect must NOT re-navigate the host back to
+// the menu, since the board/overlay state is already live in the DOM.
+function connectWs(token, onFirstOpen) {
+  hostToken = token;
+  if (hostReconnectHandle) { clearTimeout(hostReconnectHandle); hostReconnectHandle = null; }
+  setConnDot('reconnecting', hostReconnectAttempts > 0 ? `reconnecting… (${hostReconnectAttempts})` : 'connecting…');
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const socket = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+  let openedThisAttempt = false;
+
+  socket.addEventListener('open', () => {
+    openedThisAttempt = true;
+    ws = socket;
+    hostReconnectAttempts = 0;
+    setConnDot('connected', 'connected');
+    attachWsMessageHandler(socket);
+    if (!hostEnteredApp) {
+      hostEnteredApp = true;
+      if (onFirstOpen) onFirstOpen();
+    }
+  });
+
+  socket.addEventListener('close', () => {
+    if (ws === socket) ws = null;
+    if (!openedThisAttempt && !hostEnteredApp) {
+      // The very first connection attempt failed outright — an invalid/expired saved
+      // session, not a network blip. Fall back to the login screen instead of retrying forever.
+      try { localStorage.removeItem(HOST_SESSION_KEY); } catch (e) {}
+      setConnDot('disconnected', 'offline');
+      return;
+    }
+    if (hostReconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      setConnDot('disconnected', 'disconnected');
+      return;
+    }
+    hostReconnectAttempts++;
+    setConnDot('reconnecting', `reconnecting… (${hostReconnectAttempts})`);
+    const delay = Math.min(1000 * 2 ** (hostReconnectAttempts - 1), 10000);
+    hostReconnectHandle = setTimeout(() => connectWs(hostToken), delay);
   });
 }
 
@@ -916,27 +1101,29 @@ document.getElementById('closeRoomBtn').addEventListener('click', () => {
   }
 });
 
-function connectWs(token) {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
-  attachWsMessageHandler(ws);
-}
-
 function attachWsMessageHandler(socket) {
   socket.addEventListener('message', (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'lobby') renderLobby(msg.players);
-    else if (msg.type === 'buzz_log') { lastBuzzLog = msg; renderBuzzPanel(msg.entries, msg.winner, msg.excludedPlayers); }
+    else if (msg.type === 'buzz_log') {
+      lastBuzzLog = msg;
+      if (msg.winner && msg.winner.id !== lastLiveWinnerId) { playHostBuzzSound(); stopHostCountdown(); }
+      lastLiveWinnerId = msg.winner ? msg.winner.id : null;
+      renderBuzzPanel(msg.entries, msg.winner, msg.excludedPlayers);
+    }
     else if (msg.type === 'dd_state') { renderDdState(msg); handleHostReconnectState(msg); }
     else if (msg.type === 'teams_state') { roomTeams = msg.teams; renderScoreboard(); }
     else if (msg.type === 'game_state') handleGameState(msg);
     else if (msg.type === 'room_closed') handleRoomClosed();
-    // These three only ever reach the host as part of the on-(re)connect state sync
+    else if (msg.type === 'undo_state') renderUndoState(msg);
+    // These four only ever reach the host as part of the on-(re)connect state sync
     // (live judging happens through buzz_log/dd_state instead) — they're how a host who
-    // refreshed, navigated away, or dropped mid-clue gets the judging overlay back.
+    // refreshed, navigated away, or dropped mid-clue gets the judging overlay back. The
+    // exception is buzzer_timeout, which also fires live the moment nobody buzzes in time.
     else if (msg.type === 'buzzer_idle') { pendingHostClueState = null; }
     else if (msg.type === 'buzzer_open') handleHostReconnectState({ ...msg, mode: 'open' });
     else if (msg.type === 'buzzer_locked') handleHostReconnectState({ ...msg, mode: 'locked' });
+    else if (msg.type === 'buzzer_timeout') handleHostReconnectState({ ...msg, mode: 'timeout' });
   });
 }
 
@@ -982,7 +1169,7 @@ async function handleGameState(msg) {
 function handleHostReconnectState(msg) {
   if (msg.mode) {
     if (!msg.clueId) return;
-    pendingHostClueState = { clueId: msg.clueId, mode: msg.mode, answerRevealed: msg.answerRevealed };
+    pendingHostClueState = { clueId: msg.clueId, mode: msg.mode, answerRevealed: msg.answerRevealed, timerEndsAt: msg.timerEndsAt };
   } else {
     if (!msg.active || !msg.clueId) { pendingHostClueState = null; return; }
     pendingHostClueState = { clueId: msg.clueId, mode: 'dd', revealed: msg.revealed, wager: msg.wager, answerRevealed: msg.answerRevealed };
@@ -1025,12 +1212,23 @@ function applyPendingHostClueState() {
     document.getElementById('overlayAnswerImages').classList.toggle('hidden', !(clue.answerImages && clue.answerImages.length));
     document.getElementById('overlayHint').style.display = 'none';
   }
+  if (state.mode === 'open' && state.timerEndsAt) startHostCountdown(state.timerEndsAt);
+  if (state.mode === 'timeout') document.getElementById('buzzTimeoutNote').classList.remove('hidden');
   // showClueContent() above wipes the buzz panel/judge UI as if the clue just opened —
   // reapply whatever buzz_log already told us (it can arrive before this does on reconnect).
   if (lastBuzzLog) renderBuzzPanel(lastBuzzLog.entries, lastBuzzLog.winner, lastBuzzLog.excludedPlayers);
   renderScoreboard();
   document.getElementById('overlay').classList.add('show');
 }
+
+function renderUndoState(state) {
+  const bar = document.getElementById('undoBar');
+  if (!state.available) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
+  const sign = state.amount >= 0 ? '+' : '';
+  document.getElementById('undoBarText').textContent = `${state.playerName} ${sign}${state.amount}`;
+}
+document.getElementById('undoBarBtn').addEventListener('click', () => sendWs({ type: 'host_undo_score' }));
 
 function handleRoomClosed() {
   try { localStorage.removeItem(HOST_SESSION_KEY); } catch (e) {}
@@ -1074,7 +1272,7 @@ function renderBuzzPanel(entries, winner, excludedPlayers) {
     const isWinner = winner && entry.id === winner.id;
     const isExcluded = excluded.has(entry.id);
     row.className = 'buzz-row' + (isWinner ? ' winner' : '') + (isExcluded ? ' excluded-row' : '');
-    row.innerHTML = `<span><span class="place">#${idx + 1}</span>${escapeHtml(entry.name)}</span>`;
+    row.innerHTML = `<span style="display:flex;align-items:center;">${avatarHtml(entry.name)}<span class="place">#${idx + 1}</span>${escapeHtml(entry.name)}</span>`;
     panel.appendChild(row);
   });
 
@@ -1094,10 +1292,14 @@ document.getElementById('judgeCorrectBtn').addEventListener('click', (e) => {
 document.getElementById('judgeWrongBtn').addEventListener('click', (e) => {
   e.stopPropagation();
   sendWs({ type: 'host_judge', result: 'wrong' });
+  document.getElementById('buzzTimeoutNote').classList.add('hidden');
+  startHostCountdown(Date.now() + HOST_BUZZ_WINDOW_MS);
 });
 document.getElementById('reopenAllBtn').addEventListener('click', (e) => {
   e.stopPropagation();
   sendWs({ type: 'host_reopen_all' });
+  document.getElementById('buzzTimeoutNote').classList.add('hidden');
+  startHostCountdown(Date.now() + HOST_BUZZ_WINDOW_MS);
 });
 
 // ---------------- Home ----------------
@@ -1570,6 +1772,7 @@ function openClue(ci, ri, tileEl) {
   document.getElementById('normalClueContent').classList.remove('hidden');
   showClueContent(clue);
   sendWs({ type: 'host_open', clueId: `${ci}-${ri}` });
+  startHostCountdown(Date.now() + HOST_BUZZ_WINDOW_MS);
   document.getElementById('overlay').classList.add('show');
 }
 
@@ -1588,10 +1791,13 @@ function showClueContent(clue) {
 
   document.getElementById('buzzPanel').innerHTML = '';
   document.getElementById('buzzJudge').classList.add('hidden');
+  document.getElementById('buzzTimeoutNote').classList.add('hidden');
+  stopHostCountdown();
   buzzWinnerId = null;
 }
 
 function openDailyDouble(ci, ri, clue) {
+  stopHostCountdown();
   document.getElementById('normalClueContent').classList.add('hidden');
   document.getElementById('dailyDoubleOverlay').classList.remove('hidden');
   document.getElementById('ddPicker').classList.remove('hidden');
@@ -1674,6 +1880,7 @@ document.getElementById('closeOverlay').addEventListener('click', () => {
     currentClue.tileEl.textContent = '';
   }
   pauseAllOverlayMedia();
+  stopHostCountdown();
   document.getElementById('overlay').classList.remove('show');
   sendWs({ type: 'host_close' });
   currentClue = null;
@@ -1707,7 +1914,7 @@ function renderScoreboard() {
     const el = document.createElement('div');
     el.className = 'team';
     el.innerHTML = `
-      <div class="name">${escapeHtml(team.name)}</div>
+      <div class="name">${avatarHtml(team.name)}${escapeHtml(team.name)}</div>
       <div class="score">${team.score}</div>
       <div class="btns">
         <button class="minus">-${currentClueValue()}</button>

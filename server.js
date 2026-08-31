@@ -112,6 +112,7 @@ const rooms = new Map();
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h — long enough for one game night, not forever
 const ROOM_MAX_IDLE_MS = 6 * 60 * 60 * 1000;       // absolute safety net
 const ROOM_EMPTY_GRACE_MS = 15 * 60 * 1000;        // how long an empty room is kept around (reconnects)
+const BUZZ_WINDOW_MS = 8000; // how long the buzzer stays open once a clue (or a reopened window) starts
 
 const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I — easy to read aloud
 function generateRoomCode() {
@@ -136,7 +137,9 @@ function createRoom(password) {
       winner: null,            // { id, name } of the current buzz winner, or null
       excludedPlayers: new Set(), // playerIds locked out for the *current* clueId (wrong answers)
       arrivalLog: [],         // ordered log of every valid buzz this clue, for the host panel
-      answerRevealed: false   // whether the host has revealed the answer for the current clue
+      answerRevealed: false,  // whether the host has revealed the answer for the current clue
+      timerEndsAt: null,      // ms timestamp the current buzz window closes at, or null
+      timerHandle: null       // Node timeout for the above — never sent to clients
     },
     // Daily Double: no open buzzer — one designated player wagers, then answers.
     // The host picks maxWager (it already has the full game/score context); the server
@@ -148,6 +151,9 @@ function createRoom(password) {
     // disconnect (so a reconnect doesn't lose their score) — only removed by explicit
     // host action.
     teams: new Map(),
+    // The single most recent score adjustment, so the host can undo a mis-click —
+    // one level deep, not a full history, so a second adjustment just replaces it.
+    lastScoreAdjust: null, // { playerId, playerName, amount, prevScore } or null
     // Tracks which game + which of its clues are already used, so the host reconnecting
     // (menu navigation, refresh, dropped connection) can resume exactly where they left off
     // instead of the board silently resetting. `data` is the full loaded game (cached here so
@@ -208,8 +214,31 @@ function broadcastArrivalLog(room) {
 // each player needs to be told whether *they specifically* are excluded this clue.
 function broadcastBuzzerOpen(room) {
   room.clients.forEach(c => {
-    if (!c.isHost) sendTo(c, { type: 'buzzer_open', excluded: room.buzz.excludedPlayers.has(c.id) });
+    if (!c.isHost) sendTo(c, { type: 'buzzer_open', timerEndsAt: room.buzz.timerEndsAt, excluded: room.buzz.excludedPlayers.has(c.id) });
   });
+}
+
+// Starts (or restarts) the buzz window's countdown. Server-authoritative — clients just
+// render the deadline locally — so a timed-out buzz can't be won by a slow/cheating client.
+function clearBuzzTimer(room) {
+  if (room.buzz.timerHandle) clearTimeout(room.buzz.timerHandle);
+  room.buzz.timerHandle = null;
+  room.buzz.timerEndsAt = null;
+}
+function startBuzzTimer(room) {
+  clearBuzzTimer(room);
+  room.buzz.timerEndsAt = Date.now() + BUZZ_WINDOW_MS;
+  room.buzz.timerHandle = setTimeout(() => handleBuzzTimeout(room), BUZZ_WINDOW_MS);
+}
+// Nobody buzzed in time — close the window but leave the clue on screen so the host can
+// still reveal the answer or reopen manually, instead of silently reverting to the board.
+function handleBuzzTimeout(room) {
+  if (!room.buzz.open || room.buzz.locked) return;
+  room.buzz.open = false;
+  room.buzz.timerHandle = null;
+  room.buzz.timerEndsAt = null;
+  broadcastPlayers(room, { type: 'buzzer_timeout' });
+  broadcastHost(room, { type: 'buzzer_timeout', clueId: room.buzz.clueId, answerRevealed: room.buzz.answerRevealed });
 }
 
 // Every connected player is their own scoreboard entry — created the moment they join,
@@ -237,13 +266,39 @@ function hostAdjustScore(room, playerId, amount) {
   if (!team) return;
   const delta = Math.floor(Number(amount));
   if (!Number.isFinite(delta)) return;
+  const prevScore = team.score;
   team.score += delta;
+  // One-level undo, not a stack — a second adjustment just replaces the pending undo,
+  // same as the "reopen buzzer" pattern elsewhere: a manual escape hatch for a fat-fingered click.
+  room.lastScoreAdjust = { playerId, playerName: team.name, amount: delta, prevScore };
   broadcastTeamsState(room);
   broadcastAllOwnScores(room);
+  broadcastUndoState(room);
+}
+
+function hostUndoScore(room) {
+  const undo = room.lastScoreAdjust;
+  if (!undo) return;
+  room.lastScoreAdjust = null;
+  const team = room.teams.get(undo.playerId);
+  if (team) team.score = undo.prevScore;
+  broadcastTeamsState(room);
+  broadcastAllOwnScores(room);
+  broadcastUndoState(room);
+}
+
+function broadcastUndoState(room) {
+  const undo = room.lastScoreAdjust;
+  broadcastHost(room, { type: 'undo_state', available: !!undo, playerName: undo ? undo.playerName : null, amount: undo ? undo.amount : null });
 }
 
 function hostRemoveTeam(room, playerId) {
   room.teams.delete(playerId);
+  // An undo pointing at a now-removed team would resurrect it out of nowhere — drop it.
+  if (room.lastScoreAdjust && room.lastScoreAdjust.playerId === playerId) {
+    room.lastScoreAdjust = null;
+    broadcastUndoState(room);
+  }
   broadcastTeamsState(room);
   // If that player is still connected, their own client is otherwise stuck showing
   // a stale score — tell them directly since they're no longer in the teams broadcast.
@@ -340,7 +395,10 @@ function sendRoomState(room, client) {
   } else if (room.buzz.locked && room.buzz.winner) {
     sendTo(client, { type: 'buzzer_locked', clueId: room.buzz.clueId, answerRevealed: room.buzz.answerRevealed, winnerId: room.buzz.winner.id, winnerName: room.buzz.winner.name });
   } else if (room.buzz.open) {
-    sendTo(client, { type: 'buzzer_open', clueId: room.buzz.clueId, answerRevealed: room.buzz.answerRevealed, excluded: client.isHost ? undefined : room.buzz.excludedPlayers.has(client.id) });
+    sendTo(client, { type: 'buzzer_open', clueId: room.buzz.clueId, answerRevealed: room.buzz.answerRevealed, timerEndsAt: room.buzz.timerEndsAt, excluded: client.isHost ? undefined : room.buzz.excludedPlayers.has(client.id) });
+  } else if (room.buzz.clueId) {
+    // Clue is still showing but the buzz window already timed out with nobody buzzing.
+    sendTo(client, { type: 'buzzer_timeout', clueId: room.buzz.clueId, answerRevealed: room.buzz.answerRevealed });
   } else {
     sendTo(client, { type: 'buzzer_idle' });
   }
@@ -348,6 +406,7 @@ function sendRoomState(room, client) {
     broadcastArrivalLog(room);
     broadcastTeamsState(room);
     sendGameState(room);
+    broadcastUndoState(room);
   } else {
     sendOwnScore(room, client);
     const shape = boardShapeForPlayers(room);
@@ -385,6 +444,7 @@ function hostOpenClue(room, clueId) {
   room.buzz.excludedPlayers = new Set();
   room.buzz.arrivalLog = [];
   room.buzz.answerRevealed = false;
+  startBuzzTimer(room);
   const clue = findClue(room, clueId);
   if (clue) broadcastClueShown(room, clueId, clue.value);
   broadcastBuzzerOpen(room);
@@ -405,6 +465,7 @@ function hostRevealAnswer(room) {
 function hostOpenDailyDouble(room, clueId, playerId, maxWager) {
   const target = [...room.clients].find(c => !c.isHost && c.id === playerId);
   if (!target) return;
+  clearBuzzTimer(room);
   room.buzz.clueId = clueId;
   room.buzz.open = false;
   room.buzz.locked = false;
@@ -451,6 +512,7 @@ function hostMarkWrong(room) {
   room.buzz.winner = null;
   room.buzz.locked = false;
   room.buzz.open = true;
+  startBuzzTimer(room);
   broadcastPlayers(room, { type: 'buzzer_reset', excludedPlayers: [...room.buzz.excludedPlayers] });
   broadcastBuzzerOpen(room);
   broadcastArrivalLog(room);
@@ -465,6 +527,7 @@ function hostReopenAll(room) {
   room.buzz.winner = null;
   room.buzz.excludedPlayers = new Set();
   room.buzz.arrivalLog = [];
+  startBuzzTimer(room);
   broadcastPlayers(room, { type: 'buzzer_reset', excludedPlayers: [] });
   broadcastBuzzerOpen(room);
   broadcastArrivalLog(room);
@@ -477,6 +540,7 @@ function hostCloseClue(room) {
     sendGameState(room);
     broadcastBoardState(room);
   }
+  clearBuzzTimer(room);
   room.buzz.clueId = null;
   room.buzz.open = false;
   room.buzz.locked = false;
@@ -506,6 +570,7 @@ function handlePlayerBuzz(room, client) {
   }
   // First valid buzz wins — Node's single-threaded event loop processes incoming
   // WS messages one at a time, so there's no race condition to guard against here.
+  clearBuzzTimer(room);
   room.buzz.locked = true;
   room.buzz.winner = { id: client.id, name: client.name };
   room.buzz.arrivalLog.push({ id: client.id, name: client.name, ms, late: false });
@@ -682,6 +747,7 @@ wss.on('connection', (ws, req, session, room) => {
       else if (msg.type === 'host_reveal_answer') hostRevealAnswer(room);
       else if (msg.type === 'host_reveal_dd_clue') hostRevealDdClue(room);
       else if (msg.type === 'host_adjust_score' && typeof msg.playerId === 'string') hostAdjustScore(room, msg.playerId, msg.amount);
+      else if (msg.type === 'host_undo_score') hostUndoScore(room);
       else if (msg.type === 'host_remove_team' && typeof msg.playerId === 'string') hostRemoveTeam(room, msg.playerId);
       else if (msg.type === 'host_close_room') closeRoomEntirely(room);
       return;

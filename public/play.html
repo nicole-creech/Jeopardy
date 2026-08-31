@@ -36,6 +36,32 @@
     overflow-y: auto;
   }
   .hidden { display: none !important; }
+  #connDot {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--muted);
+    background: rgba(0,0,0,0.25);
+    padding: 4px 10px 4px 8px;
+    border-radius: 20px;
+    z-index: 20;
+  }
+  #connDot .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: background 0.2s ease; }
+  #connDot.connected .dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  #connDot.reconnecting .dot { background: var(--gold); box-shadow: 0 0 6px var(--gold); animation: connPulse 1s ease-in-out infinite; }
+  #connDot.disconnected .dot { background: var(--red); box-shadow: 0 0 6px var(--red); }
+  @keyframes connPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  #buzzTimer {
+    font-family: 'Fredoka', sans-serif;
+    font-size: 15px;
+    color: var(--gold);
+    min-height: 20px;
+  }
+  #buzzTimer.low { color: var(--red); }
   h1 {
     font-family: 'Fredoka', sans-serif;
     color: var(--gold);
@@ -249,6 +275,8 @@
 </head>
 <body>
 
+<div id="connDot"><span class="dot"></span><span id="connDotText">offline</span></div>
+
 <div id="loginView">
   <h1>🔔 Buzz In</h1>
   <input id="roomInput" placeholder="Room code" maxlength="8" style="text-transform:uppercase" />
@@ -270,6 +298,7 @@
   <div id="clueValue"></div>
   <div id="clueMedia"></div>
   <div id="status">Waiting for the host to open a clue...</div>
+  <div id="buzzTimer"></div>
   <button id="buzzBtn" disabled>BUZZ</button>
   <div id="buzzResult"></div>
   <div id="answerReveal" class="hidden">
@@ -292,6 +321,57 @@
 let ws = null;
 let excludedThisClue = false;
 let lockedOut = false; // buzzing is locked (someone already won this clue attempt)
+let reconnectAttempts = 0;
+let reconnectHandle = null;
+const MAX_RECONNECT_ATTEMPTS = 8;
+
+const connDot = document.getElementById('connDot');
+const connDotText = document.getElementById('connDotText');
+function setConnDot(state, text) {
+  connDot.className = state;
+  connDotText.textContent = text;
+}
+
+// Simple Web Audio beeps — no asset files, and works after any user gesture (the Join
+// click counts) unlocks the AudioContext.
+let audioCtx = null;
+function beep(freq, dur, type) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.18, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + dur);
+  } catch (e) { /* audio unsupported/blocked — silently skip */ }
+}
+function playBuzzWinSound() { beep(880, 0.22, 'triangle'); }
+
+const buzzTimerEl = document.getElementById('buzzTimer');
+let buzzTimerInterval = null;
+function startBuzzCountdown(endsAt) {
+  stopBuzzCountdown();
+  const tick = () => {
+    const remainMs = endsAt - Date.now();
+    if (remainMs <= 0) { stopBuzzCountdown(); return; }
+    const secs = Math.ceil(remainMs / 1000);
+    buzzTimerEl.textContent = `⏱ ${secs}s`;
+    buzzTimerEl.classList.toggle('low', secs <= 3);
+  };
+  tick();
+  buzzTimerInterval = setInterval(tick, 200);
+}
+function stopBuzzCountdown() {
+  if (buzzTimerInterval) clearInterval(buzzTimerInterval);
+  buzzTimerInterval = null;
+  buzzTimerEl.textContent = '';
+  buzzTimerEl.classList.remove('low');
+}
 
 const loginView = document.getElementById('loginView');
 const boardGridView = document.getElementById('boardGridView');
@@ -353,13 +433,17 @@ function tryResumeSession() {
 }
 
 function connect(token, isResume) {
+  if (reconnectHandle) { clearTimeout(reconnectHandle); reconnectHandle = null; }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
   let opened = false;
   let roomClosedByHost = false;
+  setConnDot('reconnecting', reconnectAttempts > 0 ? 'reconnecting…' : 'connecting…');
 
   ws.addEventListener('open', () => {
     opened = true;
+    reconnectAttempts = 0;
+    setConnDot('connected', 'connected');
     try { localStorage.setItem(PLAYER_SESSION_KEY, JSON.stringify({ token })); } catch (e) {}
     loginView.classList.add('hidden');
     document.getElementById('myScore').classList.remove('hidden');
@@ -372,6 +456,7 @@ function connect(token, isResume) {
       lockedOut = false;
       excludedThisClue = false;
       buzzResult.textContent = '';
+      stopBuzzCountdown();
       showBoardGridView();
       setState('idle');
     } else if (msg.type === 'buzzer_open') {
@@ -380,13 +465,22 @@ function connect(token, isResume) {
       buzzResult.textContent = '';
       showPlayView();
       setState(excludedThisClue ? 'excluded' : 'ready');
+      if (msg.timerEndsAt) startBuzzCountdown(msg.timerEndsAt); else stopBuzzCountdown();
     } else if (msg.type === 'buzzer_locked') {
       lockedOut = true;
+      stopBuzzCountdown();
       showPlayView();
       setState('locked', msg.winnerName);
+    } else if (msg.type === 'buzzer_timeout') {
+      lockedOut = true;
+      buzzResult.textContent = '';
+      stopBuzzCountdown();
+      showPlayView();
+      setState('timeout');
     } else if (msg.type === 'buzz_ack') {
       if (msg.status === 'winner') {
         buzzResult.textContent = "You're first! 🎉";
+        playBuzzWinSound();
       } else if (msg.status === 'not_open') {
         buzzResult.textContent = 'Too late!';
       } else if (msg.status === 'excluded') {
@@ -414,19 +508,36 @@ function connect(token, isResume) {
       roomClosedByHost = true;
       try { localStorage.removeItem(PLAYER_SESSION_KEY); } catch (e) {}
       wagerView.classList.add('hidden');
+      stopBuzzCountdown();
       showBoardGridView('The host closed this game.');
+      setConnDot('disconnected', 'room closed');
     }
   });
 
   ws.addEventListener('close', () => {
+    stopBuzzCountdown();
     if (roomClosedByHost) return; // that message already set the right status — don't stomp on it
     if (!opened && isResume) {
       // Saved session no longer valid (room gone/expired) — fall back to the login form.
       try { localStorage.removeItem(PLAYER_SESSION_KEY); } catch (e) {}
+      setConnDot('disconnected', 'offline');
       return;
     }
-    statusEl.textContent = 'Disconnected. Refresh to rejoin.';
-    buzzBtn.disabled = true;
+    // Try to reconnect with backoff — a dropped wifi connection shouldn't force a manual
+    // refresh when the session token (and the player's score) are still good.
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      setConnDot('disconnected', 'disconnected');
+      statusEl.textContent = 'Disconnected. Refresh to rejoin.';
+      buzzBtn.disabled = true;
+      return;
+    }
+    reconnectAttempts++;
+    setConnDot('reconnecting', `reconnecting… (${reconnectAttempts})`);
+    const delay = Math.min(1000 * 2 ** (reconnectAttempts - 1), 10000);
+    // isResume=false here (even though the token came from a resumed session) — that flag
+    // means "this is the very first attempt after a page load," which controls whether a
+    // failed attempt gives up silently. A live retry should keep backing off instead.
+    reconnectHandle = setTimeout(() => connect(token, false), delay);
   });
 }
 
@@ -441,9 +552,11 @@ function showBoardGridView(statusText) {
   wagerView.classList.add('hidden');
   boardGridView.classList.remove('hidden');
   boardStatusText.textContent = statusText || 'Waiting for the host to open a clue...';
+  stopBuzzCountdown();
 }
 
 function showWagerView(maxWager) {
+  stopBuzzCountdown();
   playView.classList.add('hidden');
   boardGridView.classList.add('hidden');
   wagerView.classList.remove('hidden');
@@ -522,6 +635,9 @@ function setState(state, winnerName) {
   } else if (state === 'locked') {
     buzzBtn.disabled = true;
     statusEl.textContent = winnerName ? `${winnerName} buzzed in first!` : 'Someone else buzzed in first.';
+  } else if (state === 'timeout') {
+    buzzBtn.disabled = true;
+    statusEl.textContent = "Time's up! Nobody buzzed in.";
   } else {
     buzzBtn.disabled = true;
     statusEl.textContent = 'Waiting for the host to open a clue...';
