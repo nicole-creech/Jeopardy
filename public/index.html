@@ -823,6 +823,7 @@ function buildMediaDrop(media, placeholder) {
     }
     renderThumbs();
     if (errors.length) flash(errors[0]);
+    else if (files.length && !added) flash('That wasn\'t an image, video, or audio file — try again.');
     return added;
   };
 
@@ -830,8 +831,7 @@ function buildMediaDrop(media, placeholder) {
   // <img>/<video> straight from a webpage/Discord rather than a file from disk).
   const applyDataTransfer = async (dt) => {
     if (dt.files && dt.files.length) {
-      const added = await applyFiles([...dt.files]);
-      if (!added) flash('That file wasn\'t an image, video, or audio clip — try again.');
+      await applyFiles([...dt.files]);
       return;
     }
     const uri = dt.getData('text/uri-list') || dt.getData('URL') || dt.getData('text/plain');
