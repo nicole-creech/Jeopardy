@@ -36,10 +36,35 @@
     overflow-y: auto;
   }
   .hidden { display: none !important; }
-  #connDot {
+  #statusBar {
     position: fixed;
     top: 12px;
     right: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    z-index: 20;
+  }
+  #soundControl {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(0,0,0,0.25);
+    padding: 4px 10px;
+    border-radius: 20px;
+  }
+  #muteBtn {
+    background: none;
+    border: none;
+    color: var(--ink);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0;
+    line-height: 1;
+  }
+  #volumeSlider { width: 56px; accent-color: var(--gold); cursor: pointer; }
+  #volumeSlider:disabled { opacity: 0.4; cursor: default; }
+  #connDot {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -48,7 +73,6 @@
     background: rgba(0,0,0,0.25);
     padding: 4px 10px 4px 8px;
     border-radius: 20px;
-    z-index: 20;
   }
   #connDot .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: background 0.2s ease; }
   #connDot.connected .dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
@@ -275,7 +299,13 @@
 </head>
 <body>
 
-<div id="connDot"><span class="dot"></span><span id="connDotText">offline</span></div>
+<div id="statusBar">
+  <div id="soundControl">
+    <button id="muteBtn" type="button" title="Mute sound">🔊</button>
+    <input id="volumeSlider" type="range" min="0" max="100" value="70" title="Volume" />
+  </div>
+  <div id="connDot"><span class="dot"></span><span id="connDotText">offline</span></div>
+</div>
 
 <div id="loginView">
   <h1>🔔 Buzz In</h1>
@@ -333,16 +363,46 @@ function setConnDot(state, text) {
 }
 
 // Simple Web Audio beeps — no asset files, and works after any user gesture (the Join
-// click counts) unlocks the AudioContext.
+// click counts) unlocks the AudioContext. Muted/volume prefs persist per-browser.
+const SOUND_PREF_KEY = 'jeopardy_sound_prefs';
+let soundPrefs = { muted: false, volume: 0.7 };
+try {
+  const saved = JSON.parse(localStorage.getItem(SOUND_PREF_KEY) || 'null');
+  if (saved) soundPrefs = { ...soundPrefs, ...saved };
+} catch (e) {}
+function saveSoundPrefs() { try { localStorage.setItem(SOUND_PREF_KEY, JSON.stringify(soundPrefs)); } catch (e) {} }
+
+const muteBtn = document.getElementById('muteBtn');
+const volumeSlider = document.getElementById('volumeSlider');
+volumeSlider.value = Math.round(soundPrefs.volume * 100);
+function updateSoundUI() {
+  muteBtn.textContent = (soundPrefs.muted || soundPrefs.volume <= 0) ? '🔇' : '🔊';
+  muteBtn.title = soundPrefs.muted ? 'Unmute sound' : 'Mute sound';
+  volumeSlider.disabled = soundPrefs.muted;
+}
+updateSoundUI();
+muteBtn.addEventListener('click', () => {
+  soundPrefs.muted = !soundPrefs.muted;
+  saveSoundPrefs();
+  updateSoundUI();
+});
+volumeSlider.addEventListener('input', () => {
+  soundPrefs.volume = volumeSlider.value / 100;
+  if (soundPrefs.volume > 0 && soundPrefs.muted) { soundPrefs.muted = false; }
+  saveSoundPrefs();
+  updateSoundUI();
+});
+
 let audioCtx = null;
 function beep(freq, dur, type) {
+  if (soundPrefs.muted || soundPrefs.volume <= 0) return;
   try {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     osc.type = type || 'sine';
     osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0.18, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.18 * soundPrefs.volume, audioCtx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
     osc.connect(gain);
     gain.connect(audioCtx.destination);
