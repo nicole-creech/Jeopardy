@@ -22,9 +22,9 @@ Then open **http://localhost:3000** in your browser.
 
 - **Home screen** — lists your saved games. Click **+ New Game** to build one from scratch, or **Play**/**Edit** an existing one.
 - **Editor** — set the board title, edit each category name, and fill in clues:
-  - **Value** — the dollar amount for that row (editable, and you can **+ Add row** or **✕ Remove row** per category)
+  - **Value** — the dollar amount for that row (editable; **+ Add row** / **✕ Remove** a row, and use **▲ ▼** to reorder rows within a category — handy if you added something as a $200 and want it down at $800 later)
   - **Answer** — what the host reveals after the clue
-  - **Clue Image (optional)** and **Answer Image (optional)** — click to upload, paste (Ctrl+V), or drag-and-drop one or more images onto either. Clue images show right away; answer images stay hidden until the answer is revealed. Dragging an image straight from a webpage works too, not just local files.
+  - **Clue Image (optional)** and **Answer Image (optional)** — click the box then paste (Ctrl+V), drag-and-drop one or more images onto it, or click **Browse files…** to pick from disk. Clue images show right away; answer images stay hidden until the answer is revealed. Dragging an image straight from a webpage works too, not just local files.
   - Save with **Save Game**, or **Save & Play** to jump straight into the board
 - **Board** — click a tile to show its value/images, click again to reveal the answer, then close it and award points to a team from the scoreboard at the bottom. Add/remove teams as needed.
 

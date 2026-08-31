@@ -200,6 +200,20 @@
     gap: 8px;
   }
   .clue-row-head .clue-value { width: 90px; }
+  .clue-row-head .row-btns { display: flex; align-items: center; gap: 4px; }
+  .move-row {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--card-border);
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    padding: 5px 7px;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .move-row:hover:not(:disabled) { color: var(--gold); border-color: var(--gold); }
+  .move-row:disabled { opacity: 0.3; cursor: default; }
   .remove-row {
     background: transparent;
     color: var(--muted);
@@ -273,6 +287,19 @@
   .image-drop:hover { border-color: #4a56a8; }
   .image-drop:focus, .image-drop.dragover { border-color: var(--gold); color: var(--gold); background: rgba(255, 213, 74, 0.06); }
   .image-drop input[type=file] { display: none; }
+  .image-drop .browse-btn {
+    display: block;
+    margin: 6px auto 0;
+    background: transparent;
+    border: none;
+    color: #8fa0ff;
+    text-decoration: underline;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+    padding: 2px;
+  }
+  .image-drop .browse-btn:hover { color: var(--gold); }
   .cat-editor .remove-cat {
     margin-top: 10px;
     width: 100%;
@@ -683,7 +710,7 @@ function buildImageDrop(images, placeholder) {
   thumbs.className = 'image-thumbs';
   wrap.appendChild(thumbs);
 
-  const defaultLabel = placeholder || 'Click to upload, or paste (Ctrl+V) / drag image(s) here — add as many as you like';
+  const defaultLabel = placeholder || 'Click here, then paste (Ctrl+V) — or drag image(s) here';
 
   const drop = document.createElement('div');
   drop.className = 'image-drop';
@@ -692,6 +719,12 @@ function buildImageDrop(images, placeholder) {
   const label = document.createElement('span');
   label.textContent = defaultLabel;
   drop.appendChild(label);
+
+  const browseBtn = document.createElement('button');
+  browseBtn.type = 'button';
+  browseBtn.className = 'browse-btn';
+  browseBtn.textContent = 'Browse files…';
+  drop.appendChild(browseBtn);
 
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
@@ -756,8 +789,10 @@ function buildImageDrop(images, placeholder) {
     flash('Nothing draggable there — try a local image file, or copy/paste it instead.');
   };
 
-  drop.addEventListener('click', (e) => {
-    if (e.target === fileInput) return;
+  // Clicking the box just focuses it so Ctrl+V works immediately — it no longer
+  // opens the file picker (that used to force a click → cancel dialog → paste dance).
+  browseBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
     fileInput.click();
   });
   fileInput.addEventListener('change', () => { applyFiles([...fileInput.files]); fileInput.value = ''; });
@@ -824,7 +859,11 @@ function renderEditor() {
             <label>Value</label>
             <input class="clue-value" type="number" step="100" value="${clue.value}" />
           </div>
-          <button class="remove-row" title="Remove row">✕ Remove row</button>
+          <div class="row-btns">
+            <button class="move-row" data-dir="up" title="Move up" ${ri === 0 ? 'disabled' : ''}>▲</button>
+            <button class="move-row" data-dir="down" title="Move down" ${ri === cat.clues.length - 1 ? 'disabled' : ''}>▼</button>
+            <button class="remove-row" title="Remove row">✕ Remove</button>
+          </div>
         </div>
         <label>Answer</label>
         <input type="text" value="${escapeHtml(clue.answer)}" placeholder="What is...?" />
@@ -834,12 +873,21 @@ function renderEditor() {
         clue.value = parseInt(e.target.value, 10) || 0;
       });
       ce.querySelector('input[type=text]').addEventListener('input', e => { clue.answer = e.target.value; });
+      ce.querySelectorAll('.move-row').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const dir = btn.dataset.dir === 'up' ? -1 : 1;
+          const target = ri + dir;
+          if (target < 0 || target >= cat.clues.length) return;
+          [cat.clues[ri], cat.clues[target]] = [cat.clues[target], cat.clues[ri]];
+          renderEditor();
+        });
+      });
       ce.querySelector('.remove-row').addEventListener('click', () => {
         cat.clues.splice(ri, 1);
         renderEditor();
       });
 
-      ce.appendChild(buildImageDrop(clue.images, 'Click to upload, or paste (Ctrl+V) / drag image(s) here — add as many as you like'));
+      ce.appendChild(buildImageDrop(clue.images));
 
       const answerImgLabel = document.createElement('label');
       answerImgLabel.textContent = 'Answer Image (optional)';
@@ -854,7 +902,7 @@ function renderEditor() {
     addRowBtn.textContent = '+ Add row';
     addRowBtn.addEventListener('click', () => {
       const lastValue = cat.clues.length ? cat.clues[cat.clues.length - 1].value : 0;
-      cat.clues.push({ value: lastValue + 200, answer: '', images: [] });
+      cat.clues.push({ value: lastValue + 200, answer: '', images: [], answerImages: [] });
       renderEditor();
     });
     el.appendChild(addRowBtn);
