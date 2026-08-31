@@ -1555,6 +1555,7 @@ document.getElementById('ddRevealBtn').addEventListener('click', (e) => {
   document.getElementById('dailyDoubleOverlay').classList.add('hidden');
   document.getElementById('normalClueContent').classList.remove('hidden');
   showClueContent(clue);
+  sendWs({ type: 'host_reveal_dd_clue' });
 });
 
 function renderMediaList(elId, media) {
@@ -1595,6 +1596,7 @@ document.getElementById('overlay').addEventListener('click', (e) => {
     ansEl.style.display = 'block';
     document.getElementById('overlayAnswerImages').classList.toggle('hidden', !(currentClue && data.categories[currentClue.ci].clues[currentClue.ri].answerImages.length));
     document.getElementById('overlayHint').style.display = 'none';
+    sendWs({ type: 'host_reveal_answer' });
   }
 });
 

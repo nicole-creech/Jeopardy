@@ -38,7 +38,7 @@ Games are saved as JSON files in the `games/` folder, so you can keep as many cu
 If you run `server.js` somewhere your friends can reach (not just `localhost`), they can buzz in for real from their own device instead of over voice chat. Hosting is self-service — anyone who reaches the site can start a game:
 
 1. Open `http://<server-address>:3000/`, set a password (your choice — this is what players will use to join), and click **Create Game**. You'll get a **room code** and a shareable player link, both shown on the home screen.
-2. Send players the link (`.../play.html?room=<code>`, which pre-fills the room code) or just tell them the code and password. They open `http://<server-address>:3000/play.html`, enter the room code, their name, and the password, and get a big BUZZ button.
+2. Send players the link (`.../play.html?room=<code>`, which pre-fills the room code) or just tell them the code and password. They open `http://<server-address>:3000/play.html`, enter the room code, their name, and the password. They see the same board the host does (category names and dollar values only — never unrevealed clue text/media/answers) until the host opens a tile, at which point their screen switches to that clue's content with the BUZZ button live at the same time, then back to the board once the host closes it.
 3. Multiple games can run on the same deployment at once — each room's password, buzzer state, and players are completely independent of any other room.
 4. When the host opens a clue, everyone's buzzer unlocks at once. First buzz wins and locks everyone else out; the host sees who buzzed live and marks **✓ Correct** or **✕ Wrong**.
    - **Correct** closes out the clue — buzzers go idle until the next one.

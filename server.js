@@ -127,12 +127,13 @@ function createRoom(password) {
       locked: false,         // true once a winner has buzzed for this clue attempt
       winner: null,            // { id, name } of the current buzz winner, or null
       excludedPlayers: new Set(), // playerIds locked out for the *current* clueId (wrong answers)
-      arrivalLog: []          // ordered log of every valid buzz this clue, for the host panel
+      arrivalLog: [],         // ordered log of every valid buzz this clue, for the host panel
+      answerRevealed: false   // whether the host has revealed the answer for the current clue
     },
     // Daily Double: no open buzzer — one designated player wagers, then answers.
     // The host picks maxWager (it already has the full game/score context); the server
     // just relays and enforces it, the same trust boundary the host already has over the room.
-    dd: { active: false, clueId: null, playerId: null, playerName: null, maxWager: 0, wager: null },
+    dd: { active: false, clueId: null, playerId: null, playerName: null, maxWager: 0, wager: null, revealed: false },
     // Scoring lives here now (not just in the host's browser) so it survives the host
     // navigating away/reconnecting, and so each player can see their own score.
     // playerId -> { id, name, score }. Created when a player joins, kept even if they
@@ -141,8 +142,10 @@ function createRoom(password) {
     teams: new Map(),
     // Tracks which game + which of its clues are already used, so the host reconnecting
     // (menu navigation, refresh, dropped connection) can resume exactly where they left off
-    // instead of the board silently resetting.
-    game: { name: null, usedClueIds: new Set() }
+    // instead of the board silently resetting. `data` is the full loaded game (cached here so
+    // the server itself — not just the host's browser — knows clue content, needed to show
+    // players the board/clue/answer without them ever having direct access to unrevealed data).
+    game: { name: null, data: null, usedClueIds: new Set() }
   };
   rooms.set(code, room);
   return room;
@@ -238,15 +241,50 @@ function hostRemoveTeam(room, playerId) {
 
 // Records which game the host is playing and resets used-clue tracking only when it's
 // actually a *different* game — re-selecting the same in-progress game is a resume, not a restart.
-function hostSelectGame(room, name) {
-  if (room.game.name !== name) {
+// The server loads the full game itself (not just the host's browser) so it can show
+// players the board/clue/answer directly, without ever handing a player's client data it
+// hasn't earned yet (unrevealed clues, answers, or other players' info).
+async function hostSelectGame(room, name) {
+  if (room.game.name !== name || !room.game.data) {
+    const data = await gamesStore.loadGame(name);
+    if (!data) return;
     room.game.name = name;
+    room.game.data = data;
     room.game.usedClueIds = new Set();
   }
   sendGameState(room);
+  broadcastBoardState(room);
 }
 function sendGameState(room) {
   broadcastHost(room, { type: 'game_state', name: room.game.name, usedClueIds: [...room.game.usedClueIds] });
+}
+
+// Players only ever get category names + dollar values — never clue text, media, answers,
+// or the Daily Double flag (that would spoil the surprise) — until the host actually opens
+// that specific clue.
+function boardShapeForPlayers(room) {
+  if (!room.game.data) return null;
+  return {
+    title: room.game.data.title || 'Jeopardy',
+    categories: room.game.data.categories.map(cat => ({
+      name: cat.name,
+      clues: cat.clues.map(clue => ({ value: clue.value }))
+    })),
+    usedClueIds: [...room.game.usedClueIds]
+  };
+}
+function broadcastBoardState(room) {
+  const shape = boardShapeForPlayers(room);
+  if (shape) broadcastPlayers(room, { type: 'board_state', ...shape });
+}
+
+// Looks up one clue's actual content from the cached game data by its "ci-ri" id.
+function findClue(room, clueId) {
+  if (!room.game.data || typeof clueId !== 'string') return null;
+  const [ci, ri] = clueId.split('-').map(Number);
+  const cat = room.game.data.categories[ci];
+  const clue = cat && cat.clues[ri];
+  return clue || null;
 }
 
 // Closes the room entirely — every connected client (host included) is notified and
@@ -297,7 +335,30 @@ function sendRoomState(room, client) {
     sendGameState(room);
   } else {
     sendOwnScore(room, client);
+    const shape = boardShapeForPlayers(room);
+    if (shape) sendTo(client, { type: 'board_state', ...shape });
+    // If a clue is already visible to players (open, or a revealed Daily Double), a
+    // reconnecting player should see it too instead of just an empty board.
+    const clueVisible = room.buzz.clueId && (!room.dd.active || room.dd.revealed);
+    if (clueVisible) {
+      const clue = findClue(room, room.buzz.clueId);
+      if (clue) {
+        const value = room.dd.active ? room.dd.wager : clue.value;
+        sendTo(client, { type: 'clue_shown', clueId: room.buzz.clueId, value, images: clue.images || [] });
+        if (room.buzz.answerRevealed) {
+          sendTo(client, { type: 'answer_shown', answer: clue.answer || '', answerImages: clue.answerImages || [] });
+        }
+      }
+    }
   }
+}
+
+// Sends the clue's public content (value + images, never the answer) to players —
+// used both when a normal clue opens and when the host reveals a Daily Double clue.
+function broadcastClueShown(room, clueId, value) {
+  const clue = findClue(room, clueId);
+  if (!clue) return;
+  broadcastPlayers(room, { type: 'clue_shown', clueId, value, images: clue.images || [] });
 }
 
 function hostOpenClue(room, clueId) {
@@ -308,8 +369,21 @@ function hostOpenClue(room, clueId) {
   room.buzz.winner = null;
   room.buzz.excludedPlayers = new Set();
   room.buzz.arrivalLog = [];
+  room.buzz.answerRevealed = false;
+  const clue = findClue(room, clueId);
+  if (clue) broadcastClueShown(room, clueId, clue.value);
   broadcastBuzzerOpen(room);
   broadcastArrivalLog(room);
+}
+
+// Host reveals the answer for whatever clue is currently showing — mirrors the same
+// moment everyone watching the host's shared screen already sees.
+function hostRevealAnswer(room) {
+  if (!room.buzz.clueId || room.buzz.answerRevealed) return;
+  const clue = findClue(room, room.buzz.clueId);
+  if (!clue) return;
+  room.buzz.answerRevealed = true;
+  broadcastPlayers(room, { type: 'answer_shown', answer: clue.answer || '', answerImages: clue.answerImages || [] });
 }
 
 // Daily Double: no open buzzer for everyone — one designated player wagers, then answers.
@@ -322,12 +396,14 @@ function hostOpenDailyDouble(room, clueId, playerId, maxWager) {
   room.buzz.winner = null;
   room.buzz.excludedPlayers = new Set();
   room.buzz.arrivalLog = [];
+  room.buzz.answerRevealed = false;
   room.dd.active = true;
   room.dd.clueId = clueId;
   room.dd.playerId = target.id;
   room.dd.playerName = target.name;
   room.dd.maxWager = Math.max(0, Math.floor(Number(maxWager)) || 0);
   room.dd.wager = null;
+  room.dd.revealed = false;
   sendTo(target, { type: 'wager_prompt', maxWager: room.dd.maxWager });
   room.clients.forEach(c => {
     if (!c.isHost && c.id !== target.id) sendTo(c, { type: 'dd_in_progress', playerName: room.dd.playerName });
@@ -341,6 +417,14 @@ function handlePlayerWager(room, client, amount) {
   room.dd.wager = Math.min(wager, room.dd.maxWager);
   sendTo(client, { type: 'wager_locked' });
   broadcastDdState(room);
+}
+
+// Host clicked "Reveal Clue" on a Daily Double — like on live TV, everyone watching sees
+// the clue itself once it's revealed (only the wager stayed private beforehand).
+function hostRevealDdClue(room) {
+  if (!room.dd.active || room.dd.wager === null || room.dd.revealed) return;
+  room.dd.revealed = true;
+  broadcastClueShown(room, room.dd.clueId, room.dd.wager);
 }
 
 // Wrong answer: exclude just that player for this clue and reopen — NOT a full
@@ -375,6 +459,7 @@ function hostCloseClue(room) {
   if (room.buzz.clueId) {
     room.game.usedClueIds.add(room.buzz.clueId);
     sendGameState(room);
+    broadcastBoardState(room);
   }
   room.buzz.clueId = null;
   room.buzz.open = false;
@@ -382,11 +467,13 @@ function hostCloseClue(room) {
   room.buzz.winner = null;
   room.buzz.excludedPlayers = new Set();
   room.buzz.arrivalLog = [];
+  room.buzz.answerRevealed = false;
   room.dd.active = false;
   room.dd.clueId = null;
   room.dd.playerId = null;
   room.dd.playerName = null;
   room.dd.wager = null;
+  room.dd.revealed = false;
   broadcastPlayers(room, { type: 'buzzer_idle' });
   broadcastArrivalLog(room);
 }
@@ -574,7 +661,9 @@ wss.on('connection', (ws, req, session, room) => {
       else if (msg.type === 'host_judge' && msg.result === 'correct') hostCloseClue(room);
       else if (msg.type === 'host_reopen_all') hostReopenAll(room);
       else if (msg.type === 'host_close') hostCloseClue(room);
-      else if (msg.type === 'host_select_game' && typeof msg.name === 'string') hostSelectGame(room, msg.name);
+      else if (msg.type === 'host_select_game' && typeof msg.name === 'string') hostSelectGame(room, msg.name).catch(() => {});
+      else if (msg.type === 'host_reveal_answer') hostRevealAnswer(room);
+      else if (msg.type === 'host_reveal_dd_clue') hostRevealDdClue(room);
       else if (msg.type === 'host_adjust_score' && typeof msg.playerId === 'string') hostAdjustScore(room, msg.playerId, msg.amount);
       else if (msg.type === 'host_remove_team' && typeof msg.playerId === 'string') hostRemoveTeam(room, msg.playerId);
       else if (msg.type === 'host_close_room') closeRoomEntirely(room);

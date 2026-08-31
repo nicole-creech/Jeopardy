@@ -33,6 +33,7 @@
     align-items: center;
     justify-content: center;
     padding: 24px;
+    overflow-y: auto;
   }
   .hidden { display: none !important; }
   h1 {
@@ -96,6 +97,76 @@
     color: var(--gold);
     font-size: 20px;
   }
+  #clueMedia {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: center;
+    max-width: 100%;
+  }
+  #clueMedia img, #clueMedia video { max-width: 100%; max-height: 32vh; border-radius: 10px; box-shadow: 0 6px 18px rgba(0,0,0,0.4); }
+  #clueMedia audio { width: 100%; }
+  #clueValue {
+    font-family: 'Fredoka', sans-serif;
+    color: var(--gold);
+    font-size: 24px;
+  }
+  #answerReveal {
+    text-align: center;
+    color: var(--gold);
+    font-family: 'Fredoka', sans-serif;
+    font-size: 16px;
+    border-top: 1px solid var(--card-border);
+    padding-top: 12px;
+    width: 100%;
+  }
+  #answerMedia { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 8px; }
+  #answerMedia img, #answerMedia video { max-width: 100%; max-height: 20vh; border-radius: 8px; }
+
+  /* ---------- Read-only board (shown between clues) ---------- */
+  #boardGridView {
+    width: 100%;
+    max-width: 480px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  #boardGridTitle {
+    font-size: 24px;
+    margin-bottom: 6px;
+  }
+  #boardStatusText {
+    font-family: 'Fredoka', sans-serif;
+    font-size: 15px;
+    color: var(--muted);
+    text-align: center;
+    margin-bottom: 4px;
+  }
+  .player-cat {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  .player-cat-name {
+    font-family: 'Fredoka', sans-serif;
+    color: var(--gold);
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 8px;
+  }
+  .player-cat-values { display: flex; gap: 6px; flex-wrap: wrap; }
+  .player-value-chip {
+    background: var(--navy-deep);
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .player-value-chip.used { opacity: 0.3; text-decoration: line-through; }
   #buzzBtn {
     width: min(80vw, 320px);
     height: min(80vw, 320px);
@@ -187,11 +258,24 @@
   <div id="loginError"></div>
 </div>
 
+<div id="myScore" class="hidden">Your score: <b id="myScoreValue">0</b></div>
+
+<div id="boardGridView" class="hidden">
+  <h1 id="boardGridTitle">Jeopardy</h1>
+  <div id="boardStatusText">Waiting for the host to open a clue...</div>
+  <div id="playerBoard"></div>
+</div>
+
 <div id="playView" class="hidden">
-  <div id="myScore">Your score: <b id="myScoreValue">0</b></div>
+  <div id="clueValue"></div>
+  <div id="clueMedia"></div>
   <div id="status">Waiting for the host to open a clue...</div>
   <button id="buzzBtn" disabled>BUZZ</button>
   <div id="buzzResult"></div>
+  <div id="answerReveal" class="hidden">
+    <div id="answerText"></div>
+    <div id="answerMedia"></div>
+  </div>
 </div>
 
 <div id="wagerView" class="hidden">
@@ -210,9 +294,11 @@ let excludedThisClue = false;
 let lockedOut = false; // buzzing is locked (someone already won this clue attempt)
 
 const loginView = document.getElementById('loginView');
+const boardGridView = document.getElementById('boardGridView');
 const playView = document.getElementById('playView');
 const wagerView = document.getElementById('wagerView');
 const statusEl = document.getElementById('status');
+const boardStatusText = document.getElementById('boardStatusText');
 const buzzBtn = document.getElementById('buzzBtn');
 const buzzResult = document.getElementById('buzzResult');
 const loginError = document.getElementById('loginError');
@@ -221,6 +307,7 @@ const wagerInput = document.getElementById('wagerInput');
 const wagerSub = document.getElementById('wagerSub');
 const wagerSubmitBtn = document.getElementById('wagerSubmitBtn');
 const wagerLockedText = document.getElementById('wagerLockedText');
+let boardData = null; // { title, categories, usedClueIds } — the read-only board mirror
 
 // Pre-fill the room code from a shared link like /play.html?room=BLUE2
 const roomInput = document.getElementById('roomInput');
@@ -275,7 +362,8 @@ function connect(token, isResume) {
     opened = true;
     try { localStorage.setItem(PLAYER_SESSION_KEY, JSON.stringify({ token })); } catch (e) {}
     loginView.classList.add('hidden');
-    playView.classList.remove('hidden');
+    document.getElementById('myScore').classList.remove('hidden');
+    showBoardGridView();
   });
 
   ws.addEventListener('message', (ev) => {
@@ -284,7 +372,7 @@ function connect(token, isResume) {
       lockedOut = false;
       excludedThisClue = false;
       buzzResult.textContent = '';
-      showPlayView();
+      showBoardGridView();
       setState('idle');
     } else if (msg.type === 'buzzer_open') {
       lockedOut = false;
@@ -306,10 +394,7 @@ function connect(token, isResume) {
         setState('excluded');
       }
     } else if (msg.type === 'dd_in_progress') {
-      showPlayView();
-      buzzBtn.disabled = true;
-      buzzResult.textContent = '';
-      statusEl.textContent = `Daily Double! Waiting on ${msg.playerName}...`;
+      showBoardGridView(`Daily Double! Waiting on ${msg.playerName}...`);
     } else if (msg.type === 'wager_prompt') {
       showWagerView(msg.maxWager);
     } else if (msg.type === 'wager_locked') {
@@ -318,14 +403,18 @@ function connect(token, isResume) {
       wagerLockedText.textContent = 'Wager locked in — good luck!';
     } else if (msg.type === 'your_score') {
       document.getElementById('myScoreValue').textContent = msg.score;
+    } else if (msg.type === 'board_state') {
+      boardData = msg;
+      renderPlayerBoard();
+    } else if (msg.type === 'clue_shown') {
+      showClue(msg.value, msg.images);
+    } else if (msg.type === 'answer_shown') {
+      showAnswer(msg.answer, msg.answerImages);
     } else if (msg.type === 'room_closed') {
       roomClosedByHost = true;
       try { localStorage.removeItem(PLAYER_SESSION_KEY); } catch (e) {}
-      statusEl.textContent = 'The host closed this game.';
-      buzzBtn.disabled = true;
-      loginView.classList.add('hidden');
-      playView.classList.remove('hidden');
       wagerView.classList.add('hidden');
+      showBoardGridView('The host closed this game.');
     }
   });
 
@@ -342,12 +431,21 @@ function connect(token, isResume) {
 }
 
 function showPlayView() {
+  boardGridView.classList.add('hidden');
   wagerView.classList.add('hidden');
   playView.classList.remove('hidden');
 }
 
+function showBoardGridView(statusText) {
+  playView.classList.add('hidden');
+  wagerView.classList.add('hidden');
+  boardGridView.classList.remove('hidden');
+  boardStatusText.textContent = statusText || 'Waiting for the host to open a clue...';
+}
+
 function showWagerView(maxWager) {
   playView.classList.add('hidden');
+  boardGridView.classList.add('hidden');
   wagerView.classList.remove('hidden');
   wagerForm.classList.remove('hidden');
   wagerLockedText.classList.add('hidden');
@@ -355,6 +453,55 @@ function showWagerView(maxWager) {
   wagerInput.max = maxWager;
   wagerInput.value = maxWager;
   wagerInput.focus();
+}
+
+// The read-only board mirror — categories + values only, updated as clues get used.
+function renderPlayerBoard() {
+  if (!boardData) return;
+  document.getElementById('boardGridTitle').textContent = boardData.title || 'Jeopardy';
+  const used = new Set(boardData.usedClueIds || []);
+  const board = document.getElementById('playerBoard');
+  board.innerHTML = '';
+  boardData.categories.forEach((cat, ci) => {
+    const catEl = document.createElement('div');
+    catEl.className = 'player-cat';
+    const values = cat.clues.map((clue, ri) => {
+      if (!clue) return '';
+      const isUsed = used.has(`${ci}-${ri}`);
+      return `<span class="player-value-chip${isUsed ? ' used' : ''}">$${clue.value}</span>`;
+    }).join('');
+    catEl.innerHTML = `<div class="player-cat-name">${escapeHtml(cat.name)}</div><div class="player-cat-values">${values}</div>`;
+    board.appendChild(catEl);
+  });
+}
+
+function showClue(value, images) {
+  showPlayView();
+  document.getElementById('clueValue').textContent = '$' + value;
+  renderPlayerMedia('clueMedia', images);
+  document.getElementById('answerReveal').classList.add('hidden');
+}
+
+function showAnswer(answer, answerImages) {
+  document.getElementById('answerText').textContent = answer;
+  renderPlayerMedia('answerMedia', answerImages);
+  document.getElementById('answerReveal').classList.remove('hidden');
+}
+
+function renderPlayerMedia(elId, media) {
+  const el = document.getElementById(elId);
+  el.innerHTML = '';
+  (media || []).forEach(item => {
+    let node;
+    if (item.type === 'video') { node = document.createElement('video'); node.src = item.src; node.controls = true; }
+    else if (item.type === 'audio') { node = document.createElement('audio'); node.src = item.src; node.controls = true; }
+    else { node = document.createElement('img'); node.src = item.src; }
+    el.appendChild(node);
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 wagerSubmitBtn.addEventListener('click', () => {
