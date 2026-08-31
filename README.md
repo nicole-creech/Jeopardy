@@ -35,7 +35,7 @@ Games are saved as JSON files in the `games/` folder, so you can keep as many cu
 
 If you run `server.js` somewhere your friends can reach (not just `localhost`), they can buzz in for real from their own device instead of over voice chat:
 
-1. Set your own passwords in `config.json` (`playerPassword` and `hostPassword` — change the defaults before hosting publicly).
+1. Copy `config.example.json` to `config.json` and set your own passwords (`playerPassword` and `hostPassword`). `config.json` is gitignored on purpose — it's not meant to be committed once it holds real passwords.
 2. Whoever runs the server opens `http://<server-address>:3000/` and logs in with the **host password** to unlock the board/editor and connect the buzzer.
 3. Players open `http://<server-address>:3000/play.html`, enter their name and the **player password**, and get a big BUZZ button.
 4. When the host opens a clue, everyone's buzzer unlocks at once. First buzz wins and locks everyone else out; the host sees who buzzed live and marks **✓ Correct** or **✕ Wrong**.
@@ -54,6 +54,17 @@ Clicking a tile marked **Daily Double** in the editor skips the normal buzzer en
 2. Only that player sees a wager prompt (everyone else just sees "Daily Double! Waiting on \_\_\_..." with no buzzer). They enter an amount up to the max and lock it in.
 3. The host sees the wager land, then clicks **Reveal Clue** — the clue displays using the wagered amount in place of its printed dollar value, and the scoreboard's +/- buttons award/deduct that wagered amount instead of the tile's face value.
 4. Closing the clue as normal returns everything to the regular buzzer for the next tile.
+
+### Security notes
+
+This is a party-game login, not a real auth system — it's deliberately simple, but it's hardened a bit past the bare minimum:
+
+- Passwords are compared with a constant-time check instead of `===`, so a failed guess can't be timed to leak how much of it was right.
+- Repeated wrong guesses on `/api/login` get rate-limited (8 attempts per 5 minutes per IP, then a 5-minute lockout) so it can't be brute-forced by a script.
+- Session tokens expire after 12 hours and are checked on every reconnect, not just at login.
+- A player's identity is tied to their name (not a fresh random ID every login), so reconnecting — or opening a second tab — doesn't let someone dodge a Daily Double/wrong-answer exclusion by "logging in again." Two people using the same name will collide; fine for a casual game, not meant for anything adversarial.
+
+What it still isn't: there's one shared password per role (no individual accounts or real kick capability), `config.json` holds plaintext passwords on disk, and this has no protection against a determined attacker who controls the network path (always run it behind `https`/`wss` if you're exposing it beyond your LAN). Good enough for a game night with friends, not for anything you'd bet real money on.
 
 ## Building the .exe yourself
 

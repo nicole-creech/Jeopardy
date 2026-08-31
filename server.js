@@ -18,7 +18,45 @@ let config = { playerPassword: 'jeopardy', hostPassword: 'hostpass' };
 try {
   config = { ...config, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) };
 } catch (e) {
-  console.warn('No config.json found (or invalid) — using default passwords. Create config.json to set your own.');
+  console.warn('No config.json found (or invalid) — using default passwords. Copy config.example.json to config.json to set your own.');
+}
+
+// Constant-time-ish password comparison — a plain === leaks how many leading
+// characters matched via response timing. Not bulletproof, but cheap insurance
+// for a password that's otherwise just compared over HTTP.
+function safeEqual(a, b) {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) {
+    crypto.timingSafeEqual(bufA, bufA); // dummy compare so the miss still takes ~constant time
+    return false;
+  }
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+// Login rate limiting — a handful of wrong guesses is a typo, dozens per minute is a
+// script. Keyed by IP, not trying to be clever about proxies/shared IPs for a party app.
+const loginAttempts = new Map(); // ip -> { count, windowStart, lockedUntil }
+const LOGIN_WINDOW_MS = 5 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 8;
+const LOGIN_LOCKOUT_MS = 5 * 60 * 1000;
+
+function checkLoginRateLimit(ip) {
+  const now = Date.now();
+  let entry = loginAttempts.get(ip);
+  if (!entry) { entry = { count: 0, windowStart: now, lockedUntil: 0 }; loginAttempts.set(ip, entry); }
+  if (entry.lockedUntil > now) return { allowed: false, retryAfterMs: entry.lockedUntil - now };
+  if (now - entry.windowStart > LOGIN_WINDOW_MS) { entry.count = 0; entry.windowStart = now; }
+  return { allowed: true };
+}
+function recordLoginFailure(ip) {
+  const entry = loginAttempts.get(ip);
+  if (!entry) return;
+  entry.count++;
+  if (entry.count >= LOGIN_MAX_ATTEMPTS) entry.lockedUntil = Date.now() + LOGIN_LOCKOUT_MS;
+}
+function recordLoginSuccess(ip) {
+  loginAttempts.delete(ip);
 }
 
 const MIME = {
@@ -55,10 +93,29 @@ function readBody(req, cb) {
 
 // ---------------- Realtime buzzer room ----------------
 // Single-room model — this app is one host running one game at a time.
-// token -> { id, name, isHost }
+// token -> { id, name, isHost, expiresAt }
 const sessions = new Map();
 // live sockets: Set of { ws, id, name, isHost }
 const clients = new Set();
+
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h — long enough for one game night, not forever
+
+// A stable identity per player name (not a fresh random id every login) so a
+// reconnect — or someone hitting /api/login twice from two tabs — doesn't let a
+// just-excluded player dodge Daily Double/wrong-answer exclusion by "logging in again".
+// Names collide case-insensitively; fine for a casual party game, not multi-tenant.
+function idForPlayer(name) {
+  return 'player:' + name.trim().toLowerCase();
+}
+
+// Sessions don't get much traffic in this app, so a slow periodic sweep is plenty —
+// no need for anything fancier to keep the map from growing unbounded over a long uptime.
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, session] of sessions) {
+    if (session.expiresAt < now) sessions.delete(token);
+  }
+}, 30 * 60 * 1000).unref();
 
 // Server-authoritative buzz state. Never trust a client's own timing/identity —
 // arrival order and "who buzzed" are both decided here, from the server's own
@@ -264,22 +321,33 @@ const server = http.createServer((req, res) => {
 
   // Login: issue a session token for either a player or the host
   if (reqPath === '/api/login' && req.method === 'POST') {
+    const ip = req.socket.remoteAddress || 'unknown';
+    const limit = checkLoginRateLimit(ip);
+    if (!limit.allowed) {
+      res.setHeader('Retry-After', Math.ceil(limit.retryAfterMs / 1000));
+      return sendJson(res, 429, { error: 'Too many attempts — try again in a few minutes.' });
+    }
+
     return readBody(req, (body) => {
       let payload;
       try { payload = JSON.parse(body); } catch (e) { return sendJson(res, 400, { error: 'Invalid JSON' }); }
       const role = payload.role === 'host' ? 'host' : 'player';
       const password = typeof payload.password === 'string' ? payload.password : '';
       const expected = role === 'host' ? config.hostPassword : config.playerPassword;
-      if (password !== expected) return sendJson(res, 401, { error: 'Incorrect password' });
+      if (!safeEqual(password, expected)) {
+        recordLoginFailure(ip);
+        return sendJson(res, 401, { error: 'Incorrect password' });
+      }
 
       const name = role === 'host'
         ? 'Host'
         : (typeof payload.name === 'string' ? payload.name.trim().slice(0, 24) : '');
       if (role === 'player' && !name) return sendJson(res, 400, { error: 'Enter a name' });
 
-      const id = crypto.randomUUID();
+      recordLoginSuccess(ip);
+      const id = role === 'host' ? 'host' : idForPlayer(name);
       const token = crypto.randomUUID();
-      sessions.set(token, { id, name, isHost: role === 'host' });
+      sessions.set(token, { id, name, isHost: role === 'host', expiresAt: Date.now() + SESSION_TTL_MS });
       sendJson(res, 200, { token, name, isHost: role === 'host' });
     });
   }
@@ -356,7 +424,7 @@ server.on('upgrade', (req, socket, head) => {
   if (url.pathname !== '/ws') { socket.destroy(); return; }
   const token = url.searchParams.get('token');
   const session = sessions.get(token);
-  if (!session) { socket.destroy(); return; }
+  if (!session || session.expiresAt < Date.now()) { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit('connection', ws, req, session);
   });
