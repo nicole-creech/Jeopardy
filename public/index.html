@@ -39,6 +39,98 @@
   ::selection { background: var(--gold); color: #111; }
   button { font-family: inherit; }
 
+  /* ---------- Host login ---------- */
+  #hostLoginView {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+  }
+  #hostLoginView h1 {
+    font-family: 'Fredoka', sans-serif;
+    color: var(--gold);
+    font-size: 48px;
+    margin: 0;
+    text-shadow: 0 3px 0 #7a5a00;
+  }
+  .login-box { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 300px; }
+  .login-box input {
+    background: var(--card);
+    color: white;
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 15px;
+    font-family: inherit;
+  }
+  .login-box input:focus { outline: none; border-color: var(--gold); }
+  #hostLoginError { color: var(--red); font-size: 13px; min-height: 16px; text-align: center; }
+
+  /* ---------- Lobby / buzz judging ---------- */
+  #lobbyBar { font-size: 13px; color: var(--muted); text-align: center; }
+  #lobbyBar b { color: var(--gold); }
+  #buzzPanel {
+    width: 100%;
+    max-width: 420px;
+    margin: 18px auto 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  #buzzPanel .buzz-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: rgba(255,255,255,0.06);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 15px;
+  }
+  #buzzPanel .buzz-row.winner { background: rgba(255, 213, 74, 0.18); border: 1px solid var(--gold); }
+  #buzzPanel .buzz-row.excluded-row { opacity: 0.45; text-decoration: line-through; }
+  #buzzPanel .buzz-row .place { font-family: 'Fredoka', sans-serif; color: var(--gold); font-weight: 600; margin-right: 10px; }
+  #buzzPanel .buzz-row .ms { color: var(--muted); font-size: 12px; }
+  #buzzJudge {
+    margin-top: 18px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  #buzzWinner {
+    font-family: 'Fredoka', sans-serif;
+    color: var(--gold);
+    font-size: 22px;
+  }
+  #buzzJudgeBtns { display: flex; gap: 12px; }
+  #buzzJudgeBtns button {
+    font-family: 'Fredoka', sans-serif;
+    border: none;
+    border-radius: 10px;
+    padding: 12px 22px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: filter 0.15s ease, transform 0.1s ease;
+  }
+  #buzzJudgeBtns button:hover { filter: brightness(1.15); transform: translateY(-1px); }
+  #judgeCorrectBtn { background: linear-gradient(180deg, var(--green), var(--green-dark)); color: white; }
+  #judgeWrongBtn { background: linear-gradient(180deg, var(--red), var(--red-dark)); color: white; }
+  #reopenAllBtn {
+    margin-top: 16px;
+    background: transparent;
+    border: 1px solid var(--card-border);
+    color: var(--muted);
+    border-radius: 8px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+  #reopenAllBtn:hover { border-color: var(--gold); color: var(--gold); }
+
   /* ---------- Home / menu screen ---------- */
   #homeView {
     flex: 1;
@@ -562,9 +654,20 @@
 </head>
 <body>
 
-<!-- ===== HOME ===== -->
-<div id="homeView">
+<!-- ===== HOST LOGIN ===== -->
+<div id="hostLoginView">
   <h1>🟦 Jeopardy</h1>
+  <div class="login-box">
+    <input id="hostPasswordInput" type="password" placeholder="Host password" />
+    <button class="big-btn" id="hostLoginBtn">Start Hosting</button>
+    <div id="hostLoginError"></div>
+  </div>
+</div>
+
+<!-- ===== HOME ===== -->
+<div id="homeView" class="hidden">
+  <h1>🟦 Jeopardy</h1>
+  <div id="lobbyBar"></div>
   <div class="home-actions">
     <button class="big-btn" id="newGameBtn">+ New Game</button>
   </div>
@@ -602,6 +705,15 @@
   <div id="overlayAnswer"></div>
   <div id="overlayAnswerImages" class="hidden"></div>
   <div id="overlayHint">Click anywhere to reveal the answer</div>
+  <div id="buzzPanel"></div>
+  <div id="buzzJudge" class="hidden">
+    <div id="buzzWinner"></div>
+    <div id="buzzJudgeBtns">
+      <button id="judgeCorrectBtn">✓ Correct</button>
+      <button id="judgeWrongBtn">✕ Wrong</button>
+    </div>
+  </div>
+  <button id="reopenAllBtn">Reopen buzzer (clear exclusions)</button>
 </div>
 
 <script>
@@ -613,13 +725,99 @@ let teams = [];
 let currentClue = null;   // {ci, ri, tileEl}
 let editingGame = null;   // in-memory game object being edited
 let editingOriginalName = null;
+let ws = null;             // host's realtime buzzer connection
+let buzzWinnerId = null;   // id of whoever currently holds the buzz for the open clue
 
 // ---------------- View switching ----------------
 function showView(id) {
-  ['homeView', 'editorView', 'boardView'].forEach(v => {
+  ['hostLoginView', 'homeView', 'editorView', 'boardView'].forEach(v => {
     document.getElementById(v).classList.toggle('hidden', v !== id);
   });
 }
+
+// ---------------- Host login + realtime buzzer ----------------
+document.getElementById('hostLoginBtn').addEventListener('click', hostLogin);
+document.getElementById('hostPasswordInput').addEventListener('keydown', e => { if (e.key === 'Enter') hostLogin(); });
+
+async function hostLogin() {
+  const password = document.getElementById('hostPasswordInput').value;
+  const errEl = document.getElementById('hostLoginError');
+  errEl.textContent = '';
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'host', password })
+    });
+    const result = await res.json();
+    if (!res.ok) { errEl.textContent = result.error || 'Login failed'; return; }
+    connectWs(result.token);
+    showView('homeView');
+    loadGameList();
+  } catch (err) {
+    errEl.textContent = 'Could not reach server';
+  }
+}
+
+function connectWs(token) {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+  ws.addEventListener('message', (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'lobby') renderLobby(msg.players);
+    else if (msg.type === 'buzz_log') renderBuzzPanel(msg.entries, msg.winner, msg.excludedPlayers);
+  });
+}
+
+function sendWs(obj) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+
+function renderLobby(players) {
+  const bar = document.getElementById('lobbyBar');
+  bar.innerHTML = players.length
+    ? `<b>${players.length}</b> player${players.length === 1 ? '' : 's'} connected: ${players.map(p => escapeHtml(p.name)).join(', ')}`
+    : 'No players connected yet — share this server\'s address and the game password from <code>config.json</code>.';
+}
+
+// entries: full arrival history for the currently-open clue (including already-judged
+// wrong buzzes), each {id, name, ms}. winner/excludedPlayers are the server's authoritative
+// view of who's actually pending judgment right now — NOT just whoever arrived first overall.
+function renderBuzzPanel(entries, winner, excludedPlayers) {
+  const panel = document.getElementById('buzzPanel');
+  const judge = document.getElementById('buzzJudge');
+  const excluded = new Set(excludedPlayers || []);
+  panel.innerHTML = '';
+  entries.forEach((entry, idx) => {
+    const row = document.createElement('div');
+    const isWinner = winner && entry.id === winner.id;
+    const isExcluded = excluded.has(entry.id);
+    row.className = 'buzz-row' + (isWinner ? ' winner' : '') + (isExcluded ? ' excluded-row' : '');
+    row.innerHTML = `<span><span class="place">#${idx + 1}</span>${escapeHtml(entry.name)}</span>`;
+    panel.appendChild(row);
+  });
+
+  buzzWinnerId = winner ? winner.id : null;
+  if (winner) {
+    document.getElementById('buzzWinner').textContent = `${winner.name} buzzed in — correct?`;
+    judge.classList.remove('hidden');
+  } else {
+    judge.classList.add('hidden');
+  }
+}
+
+document.getElementById('judgeCorrectBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  sendWs({ type: 'host_judge', result: 'correct' });
+});
+document.getElementById('judgeWrongBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  sendWs({ type: 'host_judge', result: 'wrong' });
+});
+document.getElementById('reopenAllBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  sendWs({ type: 'host_reopen_all' });
+});
 
 // ---------------- Home ----------------
 async function loadGameList() {
@@ -1087,6 +1285,11 @@ function openClue(ci, ri, tileEl) {
   ansEl.textContent = clue.answer;
   document.getElementById('overlayHint').style.display = 'block';
 
+  document.getElementById('buzzPanel').innerHTML = '';
+  document.getElementById('buzzJudge').classList.add('hidden');
+  buzzWinnerId = null;
+  sendWs({ type: 'host_open', clueId: `${ci}-${ri}` });
+
   document.getElementById('overlay').classList.add('show');
 }
 
@@ -1118,8 +1321,9 @@ function pauseAllOverlayMedia() {
 }
 
 document.getElementById('overlay').addEventListener('click', (e) => {
-  // Let video/audio playback controls work without instantly revealing the answer
-  if (e.target.id === 'closeOverlay' || e.target.tagName === 'VIDEO' || e.target.tagName === 'AUDIO') return;
+  // Let video/audio controls and the buzzer judging UI work without instantly revealing the answer
+  if (e.target.id === 'closeOverlay' || e.target.tagName === 'VIDEO' || e.target.tagName === 'AUDIO'
+    || e.target.closest('#buzzJudge') || e.target.closest('#buzzPanel') || e.target.id === 'reopenAllBtn') return;
   const ansEl = document.getElementById('overlayAnswer');
   if (ansEl.style.display !== 'block') {
     ansEl.style.display = 'block';
@@ -1135,6 +1339,7 @@ document.getElementById('closeOverlay').addEventListener('click', () => {
   }
   pauseAllOverlayMedia();
   document.getElementById('overlay').classList.remove('show');
+  sendWs({ type: 'host_close' });
   currentClue = null;
   renderScoreboard();
 });
@@ -1193,8 +1398,6 @@ document.getElementById('addTeamBtn').addEventListener('click', () => {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
-
-loadGameList();
 </script>
 </body>
 </html>

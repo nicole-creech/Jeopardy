@@ -30,6 +30,21 @@ Then open **http://localhost:3000** in your browser.
 
 Games are saved as JSON files in the `games/` folder, so you can keep as many custom boards as you want and reuse them for future game nights.
 
+## Realtime buzzer (`feature/buzzer-v2` branch)
+
+If you run `server.js` somewhere your friends can reach (not just `localhost`), they can buzz in for real from their own device instead of over voice chat:
+
+1. Set your own passwords in `config.json` (`playerPassword` and `hostPassword` — change the defaults before hosting publicly).
+2. Whoever runs the server opens `http://<server-address>:3000/` and logs in with the **host password** to unlock the board/editor and connect the buzzer.
+3. Players open `http://<server-address>:3000/play.html`, enter their name and the **player password**, and get a big BUZZ button.
+4. When the host opens a clue, everyone's buzzer unlocks at once. First buzz wins and locks everyone else out; the host sees who buzzed live and marks **✓ Correct** or **✕ Wrong**.
+   - **Correct** closes out the clue — buzzers go idle until the next one.
+   - **Wrong** excludes just that player and reopens the buzzer for everyone else on the same clue (so someone who's already gotten it wrong can't buzz in again on that clue, but nobody else who hasn't tried yet is penalized).
+   - **Reopen buzzer (clear exclusions)** is a manual override if you need to undo an exclusion and let everyone try again.
+5. If a player's connection drops and reconnects mid-clue, they're brought back up to date automatically rather than showing a stale buzzer.
+
+The server is the single source of truth for buzz order and who's excluded — player devices never decide this themselves, so a slow or manipulated client can't jump the line.
+
 ## Building the .exe yourself
 
 ```bash
