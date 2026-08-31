@@ -254,7 +254,23 @@
     overflow: hidden;
     border: 1px solid var(--card-border);
   }
-  .image-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .image-thumb img, .image-thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .image-thumb .thumb-audio {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    background: var(--navy-deep);
+  }
+  .image-thumb .thumb-badge {
+    position: absolute;
+    bottom: 2px;
+    left: 2px;
+    font-size: 12px;
+    filter: drop-shadow(0 1px 1px rgba(0,0,0,0.8));
+  }
   .image-thumb .thumb-remove {
     position: absolute;
     top: 2px;
@@ -498,11 +514,15 @@
     margin-bottom: 24px;
   }
   #overlayAnswerImages { margin-top: 20px; margin-bottom: 0; }
-  #overlayImages img, #overlayAnswerImages img {
+  #overlayImages img, #overlayAnswerImages img,
+  #overlayImages video, #overlayAnswerImages video {
     max-width: 70vw;
     max-height: 42vh;
     border-radius: 10px;
     box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  }
+  #overlayImages audio, #overlayAnswerImages audio {
+    width: min(70vw, 420px);
   }
   #overlayImages.hidden, #overlayAnswerImages.hidden { display: none; }
   #overlayAnswer {
@@ -657,24 +677,50 @@ function blankCategory() {
   };
 }
 
-// Normalizes older save files (single "image" field, missing "answerImages") into the current shape
+// Normalizes older save files into the current shape: images/answerImages are arrays of
+// {type: 'image'|'video'|'audio', src: dataURL} — older saves stored plain src strings
+// (implicitly images), or a single "image" field before that.
 function normalizeGame(game) {
+  const toMediaItem = (item) => (typeof item === 'string' ? { type: 'image', src: item } : item);
   game.categories.forEach(cat => {
     cat.clues.forEach(clue => {
-      if (!Array.isArray(clue.images)) clue.images = clue.image ? [clue.image] : [];
-      if (!Array.isArray(clue.answerImages)) clue.answerImages = [];
+      const rawImages = Array.isArray(clue.images) ? clue.images : (clue.image ? [clue.image] : []);
+      clue.images = rawImages.map(toMediaItem);
+      clue.answerImages = (Array.isArray(clue.answerImages) ? clue.answerImages : []).map(toMediaItem);
       delete clue.image;
     });
   });
   return game;
 }
 
-// Resize/compress an image file/blob to a data URL so saved games stay a reasonable size
-function fileToDataUrl(file, maxDim = 900, quality = 0.85) {
+const MAX_MEDIA_BYTES = 25 * 1024 * 1024; // video/audio can't be resized like images, so cap the raw upload
+
+// Converts a File into a {type, src} media item. Images get resized/compressed to a data
+// URL so saved games stay reasonable; GIFs/video/audio are passed through untouched since
+// re-encoding them (or flattening a GIF through <canvas>) would break animation/playback.
+function fileToMediaItem(file, maxDim = 900, quality = 0.85) {
   return new Promise((resolve, reject) => {
-    const img = new Image();
+    if (file.size > MAX_MEDIA_BYTES) {
+      reject(new Error(`${file.name || 'File'} is too large (${(file.size / 1024 / 1024).toFixed(1)}MB, limit ${MAX_MEDIA_BYTES / 1024 / 1024}MB)`));
+      return;
+    }
+
+    const kind = file.type.startsWith('video/') ? 'video'
+      : file.type.startsWith('audio/') ? 'audio'
+      : file.type.startsWith('image/') ? 'image'
+      : null;
+    if (!kind) { reject(new Error(`Unsupported file type: ${file.type || 'unknown'}`)); return; }
+
     const reader = new FileReader();
     reader.onerror = reject;
+
+    if (kind !== 'image' || file.type === 'image/gif') {
+      reader.onload = () => resolve({ type: kind, src: reader.result });
+      reader.readAsDataURL(file);
+      return;
+    }
+
+    const img = new Image();
     reader.onload = () => {
       img.onerror = reject;
       img.onload = () => {
@@ -688,7 +734,7 @@ function fileToDataUrl(file, maxDim = 900, quality = 0.85) {
         canvas.width = width;
         canvas.height = height;
         canvas.getContext('2d').drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL('image/jpeg', quality));
+        resolve({ type: 'image', src: canvas.toDataURL('image/jpeg', quality) });
       };
       img.src = reader.result;
     };
@@ -701,16 +747,19 @@ function fileToDataUrl(file, maxDim = 900, quality = 0.85) {
 window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('drop', (e) => e.preventDefault());
 
-// Builds a thumbnail strip + click/paste/drag uploader that can attach multiple images
-// to the given array (mutated in place) — used for both clue images and answer images.
-function buildImageDrop(images, placeholder) {
+const MEDIA_ACCEPT_RE = /^(image|video|audio)\//;
+
+// Builds a thumbnail strip + click/paste/drag uploader that can attach multiple images,
+// video clips, or audio clips to the given array (mutated in place) — used for both
+// clue media and answer media.
+function buildMediaDrop(media, placeholder) {
   const wrap = document.createElement('div');
 
   const thumbs = document.createElement('div');
   thumbs.className = 'image-thumbs';
   wrap.appendChild(thumbs);
 
-  const defaultLabel = placeholder || 'Click here, then paste (Ctrl+V) — or drag image(s) here';
+  const defaultLabel = placeholder || 'Click here, then paste (Ctrl+V) — or drag image/video/audio here';
 
   const drop = document.createElement('div');
   drop.className = 'image-drop';
@@ -728,19 +777,25 @@ function buildImageDrop(images, placeholder) {
 
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
-  fileInput.accept = 'image/*';
+  fileInput.accept = 'image/*,video/*,audio/*';
   fileInput.multiple = true;
   drop.appendChild(fileInput);
 
   const renderThumbs = () => {
     thumbs.innerHTML = '';
-    images.forEach((src, idx) => {
+    media.forEach((item, idx) => {
       const t = document.createElement('div');
       t.className = 'image-thumb';
-      t.innerHTML = `<img src="${src}" /><button class="thumb-remove" title="Remove">✕</button>`;
+      if (item.type === 'video') {
+        t.innerHTML = `<video src="${item.src}" muted preload="metadata"></video><span class="thumb-badge">🎬</span><button class="thumb-remove" title="Remove">✕</button>`;
+      } else if (item.type === 'audio') {
+        t.innerHTML = `<div class="thumb-audio">🔊</div><button class="thumb-remove" title="Remove">✕</button>`;
+      } else {
+        t.innerHTML = `<img src="${item.src}" /><button class="thumb-remove" title="Remove">✕</button>`;
+      }
       t.querySelector('.thumb-remove').addEventListener('click', (e) => {
         e.stopPropagation();
-        images.splice(idx, 1);
+        media.splice(idx, 1);
         renderThumbs();
       });
       thumbs.appendChild(t);
@@ -751,26 +806,32 @@ function buildImageDrop(images, placeholder) {
   const flash = (msg) => {
     label.textContent = msg;
     clearTimeout(flashTimer);
-    flashTimer = setTimeout(() => { label.textContent = defaultLabel; }, 2500);
+    flashTimer = setTimeout(() => { label.textContent = defaultLabel; }, 3200);
   };
 
   const applyFiles = async (files) => {
     let added = 0;
+    const errors = [];
     for (const file of files) {
-      if (!file || !file.type.startsWith('image/')) continue;
-      images.push(await fileToDataUrl(file));
-      added++;
+      if (!file || !MEDIA_ACCEPT_RE.test(file.type)) continue;
+      try {
+        media.push(await fileToMediaItem(file));
+        added++;
+      } catch (err) {
+        errors.push(err.message);
+      }
     }
     renderThumbs();
+    if (errors.length) flash(errors[0]);
     return added;
   };
 
   // Fallback for drags that hand over a URL instead of file bytes (e.g. dragging an
-  // <img> straight from a webpage/Discord rather than a file from disk).
+  // <img>/<video> straight from a webpage/Discord rather than a file from disk).
   const applyDataTransfer = async (dt) => {
     if (dt.files && dt.files.length) {
       const added = await applyFiles([...dt.files]);
-      if (!added) flash('That file wasn\'t an image — try again.');
+      if (!added) flash('That file wasn\'t an image, video, or audio clip — try again.');
       return;
     }
     const uri = dt.getData('text/uri-list') || dt.getData('URL') || dt.getData('text/plain');
@@ -778,15 +839,15 @@ function buildImageDrop(images, placeholder) {
       try {
         const res = await fetch(uri, { mode: 'cors' });
         const blob = await res.blob();
-        if (!blob.type.startsWith('image/')) throw new Error('not an image');
-        images.push(await fileToDataUrl(new File([blob], 'image', { type: blob.type })));
+        if (!MEDIA_ACCEPT_RE.test(blob.type)) throw new Error('not media');
+        media.push(await fileToMediaItem(new File([blob], 'media', { type: blob.type })));
         renderThumbs();
       } catch (e) {
-        flash('Could not load that image (site blocked it) — save it locally and drop the file instead.');
+        flash(e.message && e.message.startsWith('File') ? e.message : 'Could not load that (site blocked it, or too large) — save it locally and drop the file instead.');
       }
       return;
     }
-    flash('Nothing draggable there — try a local image file, or copy/paste it instead.');
+    flash('Nothing draggable there — try a local file, or copy/paste it instead.');
   };
 
   // Clicking the box just focuses it so Ctrl+V works immediately — it no longer
@@ -799,7 +860,7 @@ function buildImageDrop(images, placeholder) {
 
   drop.addEventListener('paste', (e) => {
     const items = (e.clipboardData || window.clipboardData).items;
-    const files = [...items].filter(i => i.type.startsWith('image/')).map(i => i.getAsFile());
+    const files = [...items].filter(i => MEDIA_ACCEPT_RE.test(i.type)).map(i => i.getAsFile());
     if (files.length) { applyFiles(files); e.preventDefault(); }
   });
 
@@ -867,7 +928,7 @@ function renderEditor() {
         </div>
         <label>Answer</label>
         <input type="text" value="${escapeHtml(clue.answer)}" placeholder="What is...?" />
-        <label>Clue Image (optional)</label>
+        <label>Clue Media (optional)</label>
       `;
       ce.querySelector('.clue-value').addEventListener('input', e => {
         clue.value = parseInt(e.target.value, 10) || 0;
@@ -887,12 +948,12 @@ function renderEditor() {
         renderEditor();
       });
 
-      ce.appendChild(buildImageDrop(clue.images));
+      ce.appendChild(buildMediaDrop(clue.images));
 
-      const answerImgLabel = document.createElement('label');
-      answerImgLabel.textContent = 'Answer Image (optional)';
-      ce.appendChild(answerImgLabel);
-      ce.appendChild(buildImageDrop(clue.answerImages, 'Shown when the answer is revealed'));
+      const answerMediaLabel = document.createElement('label');
+      answerMediaLabel.textContent = 'Answer Media (optional)';
+      ce.appendChild(answerMediaLabel);
+      ce.appendChild(buildMediaDrop(clue.answerImages, 'Shown when the answer is revealed — click, then paste, or drag image/video/audio'));
 
       el.appendChild(ce);
     });
@@ -1012,8 +1073,8 @@ function openClue(ci, ri, tileEl) {
   currentClue = { ci, ri, tileEl };
 
   document.getElementById('overlayValue').textContent = '$' + clue.value;
-  renderImageList('overlayImages', clue.images);
-  renderImageList('overlayAnswerImages', clue.answerImages);
+  renderMediaList('overlayImages', clue.images);
+  renderMediaList('overlayAnswerImages', clue.answerImages);
   document.getElementById('overlayAnswerImages').classList.add('hidden');
 
   const ansEl = document.getElementById('overlayAnswer');
@@ -1024,20 +1085,36 @@ function openClue(ci, ri, tileEl) {
   document.getElementById('overlay').classList.add('show');
 }
 
-function renderImageList(elId, images) {
+function renderMediaList(elId, media) {
   const el = document.getElementById(elId);
   el.innerHTML = '';
-  images = images || [];
-  el.classList.toggle('hidden', images.length === 0);
-  images.forEach(src => {
-    const img = document.createElement('img');
-    img.src = src;
-    el.appendChild(img);
+  media = media || [];
+  el.classList.toggle('hidden', media.length === 0);
+  media.forEach(item => {
+    let node;
+    if (item.type === 'video') {
+      node = document.createElement('video');
+      node.src = item.src;
+      node.controls = true;
+    } else if (item.type === 'audio') {
+      node = document.createElement('audio');
+      node.src = item.src;
+      node.controls = true;
+    } else {
+      node = document.createElement('img');
+      node.src = item.src;
+    }
+    el.appendChild(node);
   });
 }
 
+function pauseAllOverlayMedia() {
+  document.querySelectorAll('#overlay video, #overlay audio').forEach(el => el.pause());
+}
+
 document.getElementById('overlay').addEventListener('click', (e) => {
-  if (e.target.id === 'closeOverlay') return;
+  // Let video/audio playback controls work without instantly revealing the answer
+  if (e.target.id === 'closeOverlay' || e.target.tagName === 'VIDEO' || e.target.tagName === 'AUDIO') return;
   const ansEl = document.getElementById('overlayAnswer');
   if (ansEl.style.display !== 'block') {
     ansEl.style.display = 'block';
@@ -1051,6 +1128,7 @@ document.getElementById('closeOverlay').addEventListener('click', () => {
     currentClue.tileEl.classList.add('used');
     currentClue.tileEl.textContent = '';
   }
+  pauseAllOverlayMedia();
   document.getElementById('overlay').classList.remove('show');
   currentClue = null;
 });

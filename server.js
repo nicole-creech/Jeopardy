@@ -32,11 +32,13 @@ function sendJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
+// Games can now include video/audio clips (each capped client-side at 25MB), so a
+// save with several clips can be well past what plain images ever needed.
 function readBody(req, cb) {
   let body = '';
   req.on('data', chunk => {
     body += chunk;
-    if (body.length > 50 * 1024 * 1024) req.destroy();
+    if (body.length > 300 * 1024 * 1024) req.destroy();
   });
   req.on('end', () => cb(body));
 }
