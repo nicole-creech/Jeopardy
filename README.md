@@ -24,7 +24,7 @@ Then open **http://localhost:3000** in your browser.
 - **Editor** — set the board title, edit each category name, and fill in clues:
   - **Value** — the dollar amount for that row (editable, and you can **+ Add row** or **✕ Remove row** per category)
   - **Answer** — what the host reveals after the clue
-  - **Image (optional)** — click to upload, paste (Ctrl+V), or drag-and-drop one or more images onto a clue
+  - **Clue Image (optional)** and **Answer Image (optional)** — click to upload, paste (Ctrl+V), or drag-and-drop one or more images onto either. Clue images show right away; answer images stay hidden until the answer is revealed. Dragging an image straight from a webpage works too, not just local files.
   - Save with **Save Game**, or **Save & Play** to jump straight into the board
 - **Board** — click a tile to show its value/images, click again to reveal the answer, then close it and award points to a team from the scoreboard at the bottom. Add/remove teams as needed.
 

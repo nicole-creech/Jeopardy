@@ -462,7 +462,7 @@
   @keyframes overlayIn { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: scale(1); } }
   #overlay.show { display: flex; }
   #overlayValue { font-family: 'Fredoka', sans-serif; color: var(--gold); font-size: 26px; margin-bottom: 20px; letter-spacing: 1px; }
-  #overlayImages {
+  #overlayImages, #overlayAnswerImages {
     display: flex;
     flex-wrap: wrap;
     gap: 14px;
@@ -470,13 +470,14 @@
     max-width: 90%;
     margin-bottom: 24px;
   }
-  #overlayImages img {
+  #overlayAnswerImages { margin-top: 20px; margin-bottom: 0; }
+  #overlayImages img, #overlayAnswerImages img {
     max-width: 70vw;
     max-height: 42vh;
     border-radius: 10px;
     box-shadow: 0 10px 30px rgba(0,0,0,0.5);
   }
-  #overlayImages.hidden { display: none; }
+  #overlayImages.hidden, #overlayAnswerImages.hidden { display: none; }
   #overlayAnswer {
     color: var(--gold);
     font-family: 'Fredoka', sans-serif;
@@ -548,6 +549,7 @@
   <div id="overlayValue"></div>
   <div id="overlayImages"></div>
   <div id="overlayAnswer"></div>
+  <div id="overlayAnswerImages" class="hidden"></div>
   <div id="overlayHint">Click anywhere to reveal the answer</div>
 </div>
 
@@ -624,15 +626,16 @@ document.getElementById('newGameBtn').addEventListener('click', () => {
 function blankCategory() {
   return {
     name: 'Category',
-    clues: VALUE_STEPS.map(v => ({ value: v, answer: '', images: [] }))
+    clues: VALUE_STEPS.map(v => ({ value: v, answer: '', images: [], answerImages: [] }))
   };
 }
 
-// Normalizes older save files (single "image" field) into the current "images" array shape
+// Normalizes older save files (single "image" field, missing "answerImages") into the current shape
 function normalizeGame(game) {
   game.categories.forEach(cat => {
     cat.clues.forEach(clue => {
       if (!Array.isArray(clue.images)) clue.images = clue.image ? [clue.image] : [];
+      if (!Array.isArray(clue.answerImages)) clue.answerImages = [];
       delete clue.image;
     });
   });
@@ -666,18 +669,29 @@ function fileToDataUrl(file, maxDim = 900, quality = 0.85) {
   });
 }
 
-// Builds a thumbnail strip + click/paste/drag uploader that can attach multiple images to one clue
-function buildImageDrop(clue) {
+// Without this, dropping a file even slightly outside a drop zone makes the browser
+// navigate the whole page to that file instead — looks like the app just broke.
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => e.preventDefault());
+
+// Builds a thumbnail strip + click/paste/drag uploader that can attach multiple images
+// to the given array (mutated in place) — used for both clue images and answer images.
+function buildImageDrop(images, placeholder) {
   const wrap = document.createElement('div');
 
   const thumbs = document.createElement('div');
   thumbs.className = 'image-thumbs';
   wrap.appendChild(thumbs);
 
+  const defaultLabel = placeholder || 'Click to upload, or paste (Ctrl+V) / drag image(s) here — add as many as you like';
+
   const drop = document.createElement('div');
   drop.className = 'image-drop';
   drop.tabIndex = 0;
-  drop.textContent = 'Click to upload, or paste (Ctrl+V) / drag image(s) here — add as many as you like';
+
+  const label = document.createElement('span');
+  label.textContent = defaultLabel;
+  drop.appendChild(label);
 
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
@@ -687,25 +701,59 @@ function buildImageDrop(clue) {
 
   const renderThumbs = () => {
     thumbs.innerHTML = '';
-    clue.images.forEach((src, idx) => {
+    images.forEach((src, idx) => {
       const t = document.createElement('div');
       t.className = 'image-thumb';
       t.innerHTML = `<img src="${src}" /><button class="thumb-remove" title="Remove">✕</button>`;
       t.querySelector('.thumb-remove').addEventListener('click', (e) => {
         e.stopPropagation();
-        clue.images.splice(idx, 1);
+        images.splice(idx, 1);
         renderThumbs();
       });
       thumbs.appendChild(t);
     });
   };
 
+  let flashTimer = null;
+  const flash = (msg) => {
+    label.textContent = msg;
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { label.textContent = defaultLabel; }, 2500);
+  };
+
   const applyFiles = async (files) => {
+    let added = 0;
     for (const file of files) {
       if (!file || !file.type.startsWith('image/')) continue;
-      clue.images.push(await fileToDataUrl(file));
+      images.push(await fileToDataUrl(file));
+      added++;
     }
     renderThumbs();
+    return added;
+  };
+
+  // Fallback for drags that hand over a URL instead of file bytes (e.g. dragging an
+  // <img> straight from a webpage/Discord rather than a file from disk).
+  const applyDataTransfer = async (dt) => {
+    if (dt.files && dt.files.length) {
+      const added = await applyFiles([...dt.files]);
+      if (!added) flash('That file wasn\'t an image — try again.');
+      return;
+    }
+    const uri = dt.getData('text/uri-list') || dt.getData('URL') || dt.getData('text/plain');
+    if (uri && /^https?:\/\//i.test(uri)) {
+      try {
+        const res = await fetch(uri, { mode: 'cors' });
+        const blob = await res.blob();
+        if (!blob.type.startsWith('image/')) throw new Error('not an image');
+        images.push(await fileToDataUrl(new File([blob], 'image', { type: blob.type })));
+        renderThumbs();
+      } catch (e) {
+        flash('Could not load that image (site blocked it) — save it locally and drop the file instead.');
+      }
+      return;
+    }
+    flash('Nothing draggable there — try a local image file, or copy/paste it instead.');
   };
 
   drop.addEventListener('click', (e) => {
@@ -720,12 +768,14 @@ function buildImageDrop(clue) {
     if (files.length) { applyFiles(files); e.preventDefault(); }
   });
 
-  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('dragover'); });
-  drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+  drop.addEventListener('dragenter', (e) => { e.preventDefault(); e.stopPropagation(); drop.classList.add('dragover'); });
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); drop.classList.add('dragover'); });
+  drop.addEventListener('dragleave', (e) => { e.stopPropagation(); drop.classList.remove('dragover'); });
   drop.addEventListener('drop', (e) => {
     e.preventDefault();
+    e.stopPropagation();
     drop.classList.remove('dragover');
-    if (e.dataTransfer.files.length) applyFiles([...e.dataTransfer.files]);
+    applyDataTransfer(e.dataTransfer);
   });
 
   renderThumbs();
@@ -778,7 +828,7 @@ function renderEditor() {
         </div>
         <label>Answer</label>
         <input type="text" value="${escapeHtml(clue.answer)}" placeholder="What is...?" />
-        <label>Image (optional)</label>
+        <label>Clue Image (optional)</label>
       `;
       ce.querySelector('.clue-value').addEventListener('input', e => {
         clue.value = parseInt(e.target.value, 10) || 0;
@@ -789,7 +839,13 @@ function renderEditor() {
         renderEditor();
       });
 
-      ce.appendChild(buildImageDrop(clue));
+      ce.appendChild(buildImageDrop(clue.images, 'Click to upload, or paste (Ctrl+V) / drag image(s) here — add as many as you like'));
+
+      const answerImgLabel = document.createElement('label');
+      answerImgLabel.textContent = 'Answer Image (optional)';
+      ce.appendChild(answerImgLabel);
+      ce.appendChild(buildImageDrop(clue.answerImages, 'Shown when the answer is revealed'));
+
       el.appendChild(ce);
     });
 
@@ -908,15 +964,10 @@ function openClue(ci, ri, tileEl) {
   currentClue = { ci, ri, tileEl };
 
   document.getElementById('overlayValue').textContent = '$' + clue.value;
-  const imagesEl = document.getElementById('overlayImages');
-  imagesEl.innerHTML = '';
-  const images = clue.images || [];
-  imagesEl.classList.toggle('hidden', images.length === 0);
-  images.forEach(src => {
-    const img = document.createElement('img');
-    img.src = src;
-    imagesEl.appendChild(img);
-  });
+  renderImageList('overlayImages', clue.images);
+  renderImageList('overlayAnswerImages', clue.answerImages);
+  document.getElementById('overlayAnswerImages').classList.add('hidden');
+
   const ansEl = document.getElementById('overlayAnswer');
   ansEl.style.display = 'none';
   ansEl.textContent = clue.answer;
@@ -925,11 +976,24 @@ function openClue(ci, ri, tileEl) {
   document.getElementById('overlay').classList.add('show');
 }
 
+function renderImageList(elId, images) {
+  const el = document.getElementById(elId);
+  el.innerHTML = '';
+  images = images || [];
+  el.classList.toggle('hidden', images.length === 0);
+  images.forEach(src => {
+    const img = document.createElement('img');
+    img.src = src;
+    el.appendChild(img);
+  });
+}
+
 document.getElementById('overlay').addEventListener('click', (e) => {
   if (e.target.id === 'closeOverlay') return;
   const ansEl = document.getElementById('overlayAnswer');
   if (ansEl.style.display !== 'block') {
     ansEl.style.display = 'block';
+    document.getElementById('overlayAnswerImages').classList.toggle('hidden', !(currentClue && data.categories[currentClue.ci].clues[currentClue.ri].answerImages.length));
     document.getElementById('overlayHint').style.display = 'none';
   }
 });
