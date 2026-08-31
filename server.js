@@ -73,6 +73,18 @@ const room = {
   arrivalLog: []          // ordered log of every valid buzz this clue, for the host panel
 };
 
+// Daily Double: no open buzzer — one designated player wagers, then answers.
+// The host picks maxWager (it already has the full game/score context); the server just
+// relays it and enforces it, the same trust boundary the host already has over the room.
+const dd = {
+  active: false,
+  clueId: null,
+  playerId: null,
+  playerName: null,
+  maxWager: 0,
+  wager: null
+};
+
 function sendTo(client, obj) {
   if (client.ws.readyState === 1) client.ws.send(JSON.stringify(obj));
 }
@@ -104,10 +116,29 @@ function broadcastBuzzerOpen() {
   });
 }
 
+function broadcastDdState() {
+  broadcastHost({
+    type: 'dd_state',
+    active: dd.active,
+    playerId: dd.playerId,
+    playerName: dd.playerName,
+    maxWager: dd.maxWager,
+    wager: dd.wager
+  });
+}
+
 // Sends whatever the room's current state is to one client — used both right after
 // login and on reconnect, so a client's UI is never stale about what's going on.
 function sendRoomState(client) {
-  if (!room.clueId) {
+  if (dd.active) {
+    if (client.isHost) {
+      broadcastDdState();
+    } else if (client.id === dd.playerId) {
+      sendTo(client, dd.wager === null ? { type: 'wager_prompt', maxWager: dd.maxWager } : { type: 'wager_locked' });
+    } else {
+      sendTo(client, { type: 'dd_in_progress', playerName: dd.playerName });
+    }
+  } else if (!room.clueId) {
     sendTo(client, { type: 'buzzer_idle' });
   } else if (room.locked && room.winner) {
     sendTo(client, { type: 'buzzer_locked', winnerId: room.winner.id, winnerName: room.winner.name });
@@ -122,6 +153,7 @@ function sendRoomState(client) {
 }
 
 function hostOpenClue(clueId) {
+  dd.active = false;
   room.clueId = clueId;
   room.open = true;
   room.locked = false;
@@ -130,6 +162,37 @@ function hostOpenClue(clueId) {
   room.arrivalLog = [];
   broadcastBuzzerOpen();
   broadcastArrivalLog();
+}
+
+// Daily Double: no open buzzer for everyone — one designated player wagers, then answers.
+function hostOpenDailyDouble(clueId, playerId, maxWager) {
+  const target = [...clients].find(c => !c.isHost && c.id === playerId);
+  if (!target) return;
+  room.clueId = clueId;
+  room.open = false;
+  room.locked = false;
+  room.winner = null;
+  room.excludedPlayers = new Set();
+  room.arrivalLog = [];
+  dd.active = true;
+  dd.clueId = clueId;
+  dd.playerId = target.id;
+  dd.playerName = target.name;
+  dd.maxWager = Math.max(0, Math.floor(Number(maxWager)) || 0);
+  dd.wager = null;
+  sendTo(target, { type: 'wager_prompt', maxWager: dd.maxWager });
+  clients.forEach(c => {
+    if (!c.isHost && c.id !== target.id) sendTo(c, { type: 'dd_in_progress', playerName: dd.playerName });
+  });
+  broadcastDdState();
+}
+
+function handlePlayerWager(client, amount) {
+  if (!dd.active || client.id !== dd.playerId || dd.wager !== null) return;
+  const wager = Math.max(0, Math.floor(Number(amount)) || 0);
+  dd.wager = Math.min(wager, dd.maxWager);
+  sendTo(client, { type: 'wager_locked' });
+  broadcastDdState();
 }
 
 // Wrong answer: exclude just that player for this clue and reopen — NOT a full
@@ -167,6 +230,11 @@ function hostCloseClue() {
   room.winner = null;
   room.excludedPlayers = new Set();
   room.arrivalLog = [];
+  dd.active = false;
+  dd.clueId = null;
+  dd.playerId = null;
+  dd.playerName = null;
+  dd.wager = null;
   broadcastPlayers({ type: 'buzzer_idle' });
   broadcastArrivalLog();
 }
@@ -309,6 +377,9 @@ wss.on('connection', (ws, req, session) => {
 
     if (client.isHost) {
       if (msg.type === 'host_open' && typeof msg.clueId === 'string') hostOpenClue(msg.clueId);
+      else if (msg.type === 'host_open_dd' && typeof msg.clueId === 'string' && typeof msg.playerId === 'string') {
+        hostOpenDailyDouble(msg.clueId, msg.playerId, msg.maxWager);
+      }
       else if (msg.type === 'host_judge' && msg.result === 'wrong') hostMarkWrong();
       else if (msg.type === 'host_judge' && msg.result === 'correct') hostCloseClue();
       else if (msg.type === 'host_reopen_all') hostReopenAll();
@@ -317,6 +388,7 @@ wss.on('connection', (ws, req, session) => {
     }
 
     if (msg.type === 'buzz') handlePlayerBuzz(client);
+    else if (msg.type === 'wager_submit') handlePlayerWager(client, msg.amount);
   });
 
   ws.on('close', () => {

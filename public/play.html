@@ -119,6 +119,52 @@
     min-height: 26px;
     text-align: center;
   }
+
+  #wagerView {
+    width: 100%;
+    max-width: 340px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    text-align: center;
+  }
+  #wagerTitle {
+    font-family: 'Fredoka', sans-serif;
+    font-size: 30px;
+    color: var(--gold);
+    text-shadow: 0 2px 0 #7a5a00;
+  }
+  #wagerSub { color: var(--muted); font-size: 14px; }
+  #wagerInput {
+    width: 100%;
+    background: var(--card);
+    color: white;
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 14px;
+    font-size: 22px;
+    text-align: center;
+    font-family: 'Fredoka', sans-serif;
+  }
+  #wagerInput:focus { outline: none; border-color: var(--gold); }
+  #wagerSubmitBtn {
+    font-family: 'Fredoka', sans-serif;
+    background: linear-gradient(180deg, var(--green), var(--green-dark));
+    color: white;
+    border: none;
+    padding: 14px;
+    font-size: 17px;
+    font-weight: 600;
+    border-radius: 10px;
+    cursor: pointer;
+    width: 100%;
+  }
+  #wagerLockedText {
+    font-family: 'Fredoka', sans-serif;
+    font-size: 22px;
+    color: var(--gold);
+  }
 </style>
 </head>
 <body>
@@ -137,6 +183,16 @@
   <div id="buzzResult"></div>
 </div>
 
+<div id="wagerView" class="hidden">
+  <div id="wagerTitle">💰 DAILY DOUBLE!</div>
+  <div id="wagerForm">
+    <div id="wagerSub"></div>
+    <input id="wagerInput" type="number" min="0" step="100" />
+    <button id="wagerSubmitBtn">Lock In Wager</button>
+  </div>
+  <div id="wagerLockedText" class="hidden"></div>
+</div>
+
 <script>
 let ws = null;
 let excludedThisClue = false;
@@ -144,10 +200,16 @@ let lockedOut = false; // buzzing is locked (someone already won this clue attem
 
 const loginView = document.getElementById('loginView');
 const playView = document.getElementById('playView');
+const wagerView = document.getElementById('wagerView');
 const statusEl = document.getElementById('status');
 const buzzBtn = document.getElementById('buzzBtn');
 const buzzResult = document.getElementById('buzzResult');
 const loginError = document.getElementById('loginError');
+const wagerForm = document.getElementById('wagerForm');
+const wagerInput = document.getElementById('wagerInput');
+const wagerSub = document.getElementById('wagerSub');
+const wagerSubmitBtn = document.getElementById('wagerSubmitBtn');
+const wagerLockedText = document.getElementById('wagerLockedText');
 
 document.getElementById('loginBtn').addEventListener('click', login);
 document.getElementById('passwordInput').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
@@ -187,14 +249,17 @@ function connect(token) {
       lockedOut = false;
       excludedThisClue = false;
       buzzResult.textContent = '';
+      showPlayView();
       setState('idle');
     } else if (msg.type === 'buzzer_open') {
       lockedOut = false;
       if (msg.excluded) excludedThisClue = true;
       buzzResult.textContent = '';
+      showPlayView();
       setState(excludedThisClue ? 'excluded' : 'ready');
     } else if (msg.type === 'buzzer_locked') {
       lockedOut = true;
+      showPlayView();
       setState('locked', msg.winnerName);
     } else if (msg.type === 'buzz_ack') {
       if (msg.status === 'winner') {
@@ -205,6 +270,17 @@ function connect(token) {
         excludedThisClue = true;
         setState('excluded');
       }
+    } else if (msg.type === 'dd_in_progress') {
+      showPlayView();
+      buzzBtn.disabled = true;
+      buzzResult.textContent = '';
+      statusEl.textContent = `Daily Double! Waiting on ${msg.playerName}...`;
+    } else if (msg.type === 'wager_prompt') {
+      showWagerView(msg.maxWager);
+    } else if (msg.type === 'wager_locked') {
+      wagerForm.classList.add('hidden');
+      wagerLockedText.classList.remove('hidden');
+      wagerLockedText.textContent = 'Wager locked in — good luck!';
     }
   });
 
@@ -213,6 +289,28 @@ function connect(token) {
     buzzBtn.disabled = true;
   });
 }
+
+function showPlayView() {
+  wagerView.classList.add('hidden');
+  playView.classList.remove('hidden');
+}
+
+function showWagerView(maxWager) {
+  playView.classList.add('hidden');
+  wagerView.classList.remove('hidden');
+  wagerForm.classList.remove('hidden');
+  wagerLockedText.classList.add('hidden');
+  wagerSub.textContent = `Wager up to $${maxWager}`;
+  wagerInput.max = maxWager;
+  wagerInput.value = maxWager;
+  wagerInput.focus();
+}
+
+wagerSubmitBtn.addEventListener('click', () => {
+  if (!ws) return;
+  const amount = parseInt(wagerInput.value, 10) || 0;
+  ws.send(JSON.stringify({ type: 'wager_submit', amount }));
+});
 
 function setState(state, winnerName) {
   buzzBtn.classList.remove('excluded');

@@ -273,6 +273,16 @@
     margin-top: 8px;
   }
   .clue-editor label { font-size: 11px; color: var(--muted); display: block; margin-top: 6px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .dd-label {
+    display: flex !important;
+    align-items: center;
+    gap: 6px;
+    text-transform: none !important;
+    font-size: 12px !important;
+    color: var(--gold) !important;
+    cursor: pointer;
+  }
+  .dd-label input[type=checkbox] { width: auto; accent-color: var(--gold); cursor: pointer; }
   .clue-editor input, .clue-editor textarea {
     width: 100%;
     background: var(--navy-deep);
@@ -601,6 +611,32 @@
   @keyframes overlayIn { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: scale(1); } }
   #overlay.show { display: flex; }
   #overlayValue { font-family: 'Fredoka', sans-serif; color: var(--gold); font-size: 26px; margin-bottom: 20px; letter-spacing: 1px; }
+  #dailyDoubleOverlay {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  #ddTitle {
+    font-family: 'Fredoka', sans-serif;
+    font-size: 48px;
+    color: var(--gold);
+    text-shadow: 0 3px 0 #7a5a00;
+    margin-bottom: 12px;
+  }
+  #ddPicker, #ddWaiting { display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%; max-width: 320px; }
+  #ddPicker label, #ddWaiting label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+  #ddPicker select, #ddPicker input {
+    width: 100%;
+    background: var(--card);
+    color: white;
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 15px;
+    font-family: inherit;
+  }
+  #ddWaitingText { font-family: 'Fredoka', sans-serif; font-size: 22px; color: var(--ink); text-align: center; }
   #overlayImages, #overlayAnswerImages {
     display: flex;
     flex-wrap: wrap;
@@ -700,20 +736,38 @@
 
 <div id="overlay">
   <button id="closeOverlay">✕</button>
-  <div id="overlayValue"></div>
-  <div id="overlayImages"></div>
-  <div id="overlayAnswer"></div>
-  <div id="overlayAnswerImages" class="hidden"></div>
-  <div id="overlayHint">Click anywhere to reveal the answer</div>
-  <div id="buzzPanel"></div>
-  <div id="buzzJudge" class="hidden">
-    <div id="buzzWinner"></div>
-    <div id="buzzJudgeBtns">
-      <button id="judgeCorrectBtn">✓ Correct</button>
-      <button id="judgeWrongBtn">✕ Wrong</button>
+
+  <div id="dailyDoubleOverlay" class="hidden">
+    <div id="ddTitle">💰 DAILY DOUBLE 💰</div>
+    <div id="ddPicker">
+      <label>Who's wagering?</label>
+      <select id="ddPlayerSelect"></select>
+      <label>Max wager</label>
+      <input id="ddMaxWagerInput" type="number" step="100" min="0" />
+      <button id="ddStartBtn" class="big-btn">Start Wager</button>
+    </div>
+    <div id="ddWaiting" class="hidden">
+      <div id="ddWaitingText"></div>
+      <button id="ddRevealBtn" class="big-btn hidden">Reveal Clue</button>
     </div>
   </div>
-  <button id="reopenAllBtn">Reopen buzzer (clear exclusions)</button>
+
+  <div id="normalClueContent">
+    <div id="overlayValue"></div>
+    <div id="overlayImages"></div>
+    <div id="overlayAnswer"></div>
+    <div id="overlayAnswerImages" class="hidden"></div>
+    <div id="overlayHint">Click anywhere to reveal the answer</div>
+    <div id="buzzPanel"></div>
+    <div id="buzzJudge" class="hidden">
+      <div id="buzzWinner"></div>
+      <div id="buzzJudgeBtns">
+        <button id="judgeCorrectBtn">✓ Correct</button>
+        <button id="judgeWrongBtn">✕ Wrong</button>
+      </div>
+    </div>
+    <button id="reopenAllBtn">Reopen buzzer (clear exclusions)</button>
+  </div>
 </div>
 
 <script>
@@ -727,6 +781,8 @@ let editingGame = null;   // in-memory game object being edited
 let editingOriginalName = null;
 let ws = null;             // host's realtime buzzer connection
 let buzzWinnerId = null;   // id of whoever currently holds the buzz for the open clue
+let lobbyPlayers = [];     // currently connected players, for the Daily Double picker
+let activeWager = null;    // wager amount in play for the current Daily Double, or null
 
 // ---------------- View switching ----------------
 function showView(id) {
@@ -766,6 +822,7 @@ function connectWs(token) {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'lobby') renderLobby(msg.players);
     else if (msg.type === 'buzz_log') renderBuzzPanel(msg.entries, msg.winner, msg.excludedPlayers);
+    else if (msg.type === 'dd_state') renderDdState(msg);
   });
 }
 
@@ -774,10 +831,34 @@ function sendWs(obj) {
 }
 
 function renderLobby(players) {
+  lobbyPlayers = players;
   const bar = document.getElementById('lobbyBar');
   bar.innerHTML = players.length
     ? `<b>${players.length}</b> player${players.length === 1 ? '' : 's'} connected: ${players.map(p => escapeHtml(p.name)).join(', ')}`
     : 'No players connected yet — share this server\'s address and the game password from <code>config.json</code>.';
+}
+
+// Reflects the server's authoritative Daily Double state in the host's DD picker overlay:
+// waiting-for-wager once a player is picked, then a Reveal Clue button once they've submitted.
+function renderDdState(state) {
+  const waiting = document.getElementById('ddWaiting');
+  const picker = document.getElementById('ddPicker');
+  if (!state.active) {
+    waiting.classList.add('hidden');
+    picker.classList.remove('hidden');
+    return;
+  }
+  picker.classList.add('hidden');
+  waiting.classList.remove('hidden');
+  if (state.wager === null) {
+    document.getElementById('ddWaitingText').textContent = `Waiting for ${state.playerName} to wager...`;
+    document.getElementById('ddRevealBtn').classList.add('hidden');
+  } else {
+    activeWager = state.wager;
+    document.getElementById('ddWaitingText').textContent = `${state.playerName} wagered $${state.wager}.`;
+    document.getElementById('ddRevealBtn').classList.remove('hidden');
+    renderScoreboard();
+  }
 }
 
 // entries: full arrival history for the currently-open clue (including already-judged
@@ -875,13 +956,14 @@ document.getElementById('newGameBtn').addEventListener('click', () => {
 function blankCategory() {
   return {
     name: 'Category',
-    clues: VALUE_STEPS.map(v => ({ value: v, answer: '', images: [], answerImages: [] }))
+    clues: VALUE_STEPS.map(v => ({ value: v, answer: '', images: [], answerImages: [], dailyDouble: false }))
   };
 }
 
 // Normalizes older save files into the current shape: images/answerImages are arrays of
 // {type: 'image'|'video'|'audio', src: dataURL} — older saves stored plain src strings
-// (implicitly images), or a single "image" field before that.
+// (implicitly images), or a single "image" field before that. dailyDouble defaults to
+// false for any clue saved before that flag existed.
 function normalizeGame(game) {
   const toMediaItem = (item) => (typeof item === 'string' ? { type: 'image', src: item } : item);
   game.categories.forEach(cat => {
@@ -889,6 +971,7 @@ function normalizeGame(game) {
       const rawImages = Array.isArray(clue.images) ? clue.images : (clue.image ? [clue.image] : []);
       clue.images = rawImages.map(toMediaItem);
       clue.answerImages = (Array.isArray(clue.answerImages) ? clue.answerImages : []).map(toMediaItem);
+      clue.dailyDouble = !!clue.dailyDouble;
       delete clue.image;
     });
   });
@@ -1128,6 +1211,7 @@ function renderEditor() {
             <button class="remove-row" title="Remove row">✕ Remove</button>
           </div>
         </div>
+        <label class="dd-label"><input type="checkbox" class="dd-checkbox" ${clue.dailyDouble ? 'checked' : ''} /> Daily Double</label>
         <label>Answer</label>
         <input type="text" value="${escapeHtml(clue.answer)}" placeholder="What is...?" />
         <label>Clue Media (optional)</label>
@@ -1135,6 +1219,7 @@ function renderEditor() {
       ce.querySelector('.clue-value').addEventListener('input', e => {
         clue.value = parseInt(e.target.value, 10) || 0;
       });
+      ce.querySelector('.dd-checkbox').addEventListener('change', e => { clue.dailyDouble = e.target.checked; });
       ce.querySelector('input[type=text]').addEventListener('input', e => { clue.answer = e.target.value; });
       ce.querySelectorAll('.move-row').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -1165,7 +1250,7 @@ function renderEditor() {
     addRowBtn.textContent = '+ Add row';
     addRowBtn.addEventListener('click', () => {
       const lastValue = cat.clues.length ? cat.clues[cat.clues.length - 1].value : 0;
-      cat.clues.push({ value: lastValue + 200, answer: '', images: [], answerImages: [] });
+      cat.clues.push({ value: lastValue + 200, answer: '', images: [], answerImages: [], dailyDouble: false });
       renderEditor();
     });
     el.appendChild(addRowBtn);
@@ -1273,9 +1358,25 @@ function openClue(ci, ri, tileEl) {
   if (tileEl.classList.contains('used')) return;
   const clue = data.categories[ci].clues[ri];
   currentClue = { ci, ri, tileEl };
+  activeWager = null;
   renderScoreboard();
 
-  document.getElementById('overlayValue').textContent = '$' + clue.value;
+  if (clue.dailyDouble) {
+    openDailyDouble(ci, ri, clue);
+    return;
+  }
+
+  document.getElementById('dailyDoubleOverlay').classList.add('hidden');
+  document.getElementById('normalClueContent').classList.remove('hidden');
+  showClueContent(clue);
+  sendWs({ type: 'host_open', clueId: `${ci}-${ri}` });
+  document.getElementById('overlay').classList.add('show');
+}
+
+// Fills in the normal clue-display elements (value/media/answer) — shared between a
+// regular clue and a Daily Double once its wager has been revealed.
+function showClueContent(clue) {
+  document.getElementById('overlayValue').textContent = '$' + (activeWager !== null ? activeWager : clue.value);
   renderMediaList('overlayImages', clue.images);
   renderMediaList('overlayAnswerImages', clue.answerImages);
   document.getElementById('overlayAnswerImages').classList.add('hidden');
@@ -1288,10 +1389,41 @@ function openClue(ci, ri, tileEl) {
   document.getElementById('buzzPanel').innerHTML = '';
   document.getElementById('buzzJudge').classList.add('hidden');
   buzzWinnerId = null;
-  sendWs({ type: 'host_open', clueId: `${ci}-${ri}` });
+}
+
+function openDailyDouble(ci, ri, clue) {
+  document.getElementById('normalClueContent').classList.add('hidden');
+  document.getElementById('dailyDoubleOverlay').classList.remove('hidden');
+  document.getElementById('ddPicker').classList.remove('hidden');
+  document.getElementById('ddWaiting').classList.add('hidden');
+
+  const select = document.getElementById('ddPlayerSelect');
+  select.innerHTML = lobbyPlayers.length
+    ? lobbyPlayers.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')
+    : '<option value="">No players connected</option>';
+
+  const maxClueValue = Math.max(200, ...data.categories.flatMap(c => c.clues.map(cl => cl.value)));
+  document.getElementById('ddMaxWagerInput').value = maxClueValue;
 
   document.getElementById('overlay').classList.add('show');
 }
+
+document.getElementById('ddStartBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const playerId = document.getElementById('ddPlayerSelect').value;
+  const maxWager = parseInt(document.getElementById('ddMaxWagerInput').value, 10) || 0;
+  if (!playerId || !currentClue) return;
+  sendWs({ type: 'host_open_dd', clueId: `${currentClue.ci}-${currentClue.ri}`, playerId, maxWager });
+});
+
+document.getElementById('ddRevealBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (!currentClue) return;
+  const clue = data.categories[currentClue.ci].clues[currentClue.ri];
+  document.getElementById('dailyDoubleOverlay').classList.add('hidden');
+  document.getElementById('normalClueContent').classList.remove('hidden');
+  showClueContent(clue);
+});
 
 function renderMediaList(elId, media) {
   const el = document.getElementById(elId);
@@ -1321,9 +1453,11 @@ function pauseAllOverlayMedia() {
 }
 
 document.getElementById('overlay').addEventListener('click', (e) => {
-  // Let video/audio controls and the buzzer judging UI work without instantly revealing the answer
+  // Let video/audio controls, the buzzer judging UI, and the Daily Double picker work
+  // without instantly revealing the answer
   if (e.target.id === 'closeOverlay' || e.target.tagName === 'VIDEO' || e.target.tagName === 'AUDIO'
-    || e.target.closest('#buzzJudge') || e.target.closest('#buzzPanel') || e.target.id === 'reopenAllBtn') return;
+    || e.target.closest('#buzzJudge') || e.target.closest('#buzzPanel') || e.target.id === 'reopenAllBtn'
+    || e.target.closest('#dailyDoubleOverlay')) return;
   const ansEl = document.getElementById('overlayAnswer');
   if (ansEl.style.display !== 'block') {
     ansEl.style.display = 'block';
@@ -1341,8 +1475,17 @@ document.getElementById('closeOverlay').addEventListener('click', () => {
   document.getElementById('overlay').classList.remove('show');
   sendWs({ type: 'host_close' });
   currentClue = null;
+  activeWager = null;
   renderScoreboard();
 });
+
+// While a Daily Double's wager is active, scoring should follow the wagered amount,
+// not the tile's printed face value.
+function currentClueValue() {
+  if (activeWager !== null) return activeWager;
+  if (currentClue) return data.categories[currentClue.ci].clues[currentClue.ri].value;
+  return 200;
+}
 
 function renderScoreboard() {
   const board = document.getElementById('scoreboard');
@@ -1354,8 +1497,8 @@ function renderScoreboard() {
       <input class="name" value="${escapeHtml(team.name)}" />
       <div class="score">${team.score}</div>
       <div class="btns">
-        <button class="minus">-${currentClue ? data.categories[currentClue.ci].clues[currentClue.ri].value : 200}</button>
-        <button class="plus">+${currentClue ? data.categories[currentClue.ci].clues[currentClue.ri].value : 200}</button>
+        <button class="minus">-${currentClueValue()}</button>
+        <button class="plus">+${currentClueValue()}</button>
       </div>
       <div class="btns half">
         <button class="minus-half">-100</button>
@@ -1367,11 +1510,11 @@ function renderScoreboard() {
       teams[idx].name = e.target.value;
     });
     el.querySelector('.plus').addEventListener('click', () => {
-      teams[idx].score += currentClue ? data.categories[currentClue.ci].clues[currentClue.ri].value : 200;
+      teams[idx].score += currentClueValue();
       renderScoreboard();
     });
     el.querySelector('.minus').addEventListener('click', () => {
-      teams[idx].score -= currentClue ? data.categories[currentClue.ci].clues[currentClue.ri].value : 200;
+      teams[idx].score -= currentClueValue();
       renderScoreboard();
     });
     el.querySelector('.plus-half').addEventListener('click', () => {

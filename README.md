@@ -23,6 +23,7 @@ Then open **http://localhost:3000** in your browser.
 - **Home screen** — lists your saved games. Click **+ New Game** to build one from scratch, or **Play**/**Edit** an existing one.
 - **Editor** — set the board title, edit each category name, and fill in clues:
   - **Value** — the dollar amount for that row (editable; **+ Add row** / **✕ Remove** a row, and use **▲ ▼** to reorder rows within a category — handy if you added something as a $200 and want it down at $800 later)
+  - **Daily Double** checkbox — marks that row as a Daily Double (see the realtime buzzer section below for how it plays out)
   - **Answer** — what the host reveals after the clue
   - **Clue Media (optional)** and **Answer Media (optional)** — click the box then paste (Ctrl+V), drag-and-drop, or click **Browse files…** to attach images, GIFs, video clips, or audio clips (any mix, multiple per clue). Clue media shows right away; answer media stays hidden until the answer is revealed. Dragging an image straight from a webpage works too, not just local files. Video/audio clips are capped at 25MB each since — unlike images — they can't be auto-compressed.
   - Save with **Save Game**, or **Save & Play** to jump straight into the board
@@ -44,6 +45,15 @@ If you run `server.js` somewhere your friends can reach (not just `localhost`), 
 5. If a player's connection drops and reconnects mid-clue, they're brought back up to date automatically rather than showing a stale buzzer.
 
 The server is the single source of truth for buzz order and who's excluded — player devices never decide this themselves, so a slow or manipulated client can't jump the line.
+
+### Daily Double
+
+Clicking a tile marked **Daily Double** in the editor skips the normal buzzer entirely:
+
+1. The host picks which connected player is wagering and sets a max wager (defaults to the highest dollar value on the board), then clicks **Start Wager**.
+2. Only that player sees a wager prompt (everyone else just sees "Daily Double! Waiting on \_\_\_..." with no buzzer). They enter an amount up to the max and lock it in.
+3. The host sees the wager land, then clicks **Reveal Clue** — the clue displays using the wagered amount in place of its printed dollar value, and the scoreboard's +/- buttons award/deduct that wagered amount instead of the tile's face value.
+4. Closing the clue as normal returns everything to the regular buzzer for the next tile.
 
 ## Building the .exe yourself
 
