@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Buzz In</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+  :root {
+    --navy-deep: #050a30;
+    --navy: #0b1257;
+    --gold: #ffd54a;
+    --green: #23a35a;
+    --green-dark: #17753e;
+    --red: #e5484d;
+    --red-dark: #b1373b;
+    --ink: #eef1ff;
+    --muted: #9aa3d1;
+    --card: #111a4d;
+    --card-border: #263275;
+    --bg: radial-gradient(ellipse at top, #0c1868 0%, #050822 65%, #020313 100%);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    background-attachment: fixed;
+    color: var(--ink);
+    font-family: 'Inter', system-ui, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .hidden { display: none !important; }
+  h1 {
+    font-family: 'Fredoka', sans-serif;
+    color: var(--gold);
+    font-size: 32px;
+    margin: 0 0 24px;
+    text-shadow: 0 2px 0 #7a5a00;
+  }
+  #loginView {
+    width: 100%;
+    max-width: 340px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    text-align: center;
+  }
+  #loginView input {
+    background: var(--card);
+    color: white;
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 16px;
+    font-family: inherit;
+  }
+  #loginView input:focus { outline: none; border-color: var(--gold); }
+  #loginBtn {
+    font-family: 'Fredoka', sans-serif;
+    background: linear-gradient(180deg, var(--green), var(--green-dark));
+    color: white;
+    border: none;
+    padding: 14px;
+    font-size: 17px;
+    font-weight: 600;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+  #loginError { color: var(--red); font-size: 13px; min-height: 16px; }
+
+  #playView {
+    width: 100%;
+    max-width: 420px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+  }
+  #status {
+    font-family: 'Fredoka', sans-serif;
+    font-size: 18px;
+    color: var(--muted);
+    text-align: center;
+  }
+  #buzzBtn {
+    width: min(80vw, 320px);
+    height: min(80vw, 320px);
+    border-radius: 50%;
+    border: none;
+    font-family: 'Fredoka', sans-serif;
+    font-size: 42px;
+    font-weight: 700;
+    color: white;
+    background: radial-gradient(circle at 35% 30%, #ff6b6f, var(--red-dark));
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5), inset 0 -6px 12px rgba(0,0,0,0.25);
+    cursor: pointer;
+    transition: transform 0.08s ease, filter 0.15s ease;
+  }
+  #buzzBtn:active { transform: scale(0.96); }
+  #buzzBtn:disabled {
+    background: linear-gradient(180deg, #2a3163, #1a1f42);
+    color: #666f9e;
+    box-shadow: inset 0 4px 10px rgba(0,0,0,0.4);
+    cursor: default;
+  }
+  #buzzResult {
+    font-family: 'Fredoka', sans-serif;
+    font-size: 20px;
+    color: var(--gold);
+    min-height: 26px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<div id="loginView">
+  <h1>🔔 Buzz In</h1>
+  <input id="nameInput" placeholder="Your name" maxlength="24" />
+  <input id="passwordInput" type="password" placeholder="Game password" />
+  <button id="loginBtn">Join</button>
+  <div id="loginError"></div>
+</div>
+
+<div id="playView" class="hidden">
+  <div id="status">Waiting for the host to open a clue...</div>
+  <button id="buzzBtn" disabled>BUZZ</button>
+  <div id="buzzResult"></div>
+</div>
+
+<script>
+let ws = null;
+let playerName = '';
+let currentClueId = null;
+let hasBuzzedThisClue = false;
+
+const loginView = document.getElementById('loginView');
+const playView = document.getElementById('playView');
+const statusEl = document.getElementById('status');
+const buzzBtn = document.getElementById('buzzBtn');
+const buzzResult = document.getElementById('buzzResult');
+const loginError = document.getElementById('loginError');
+
+document.getElementById('loginBtn').addEventListener('click', login);
+document.getElementById('passwordInput').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+
+async function login() {
+  const name = document.getElementById('nameInput').value.trim();
+  const password = document.getElementById('passwordInput').value;
+  if (!name) { loginError.textContent = 'Enter a name'; return; }
+  loginError.textContent = '';
+
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'player', name, password })
+    });
+    const result = await res.json();
+    if (!res.ok) { loginError.textContent = result.error || 'Login failed'; return; }
+    playerName = result.name;
+    connect(result.token);
+  } catch (err) {
+    loginError.textContent = 'Could not reach server';
+  }
+}
+
+function connect(token) {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+
+  ws.addEventListener('open', () => {
+    loginView.classList.add('hidden');
+    playView.classList.remove('hidden');
+  });
+
+  ws.addEventListener('message', (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'state') {
+      currentClueId = msg.clueId;
+      hasBuzzedThisClue = false;
+      setUnlocked(msg.open);
+    } else if (msg.type === 'opened') {
+      currentClueId = msg.clueId;
+      hasBuzzedThisClue = false;
+      buzzResult.textContent = '';
+      setUnlocked(true);
+    } else if (msg.type === 'closed') {
+      setUnlocked(false);
+    } else if (msg.type === 'buzzed') {
+      hasBuzzedThisClue = true;
+      buzzBtn.disabled = true;
+      buzzResult.textContent = msg.place === 1 ? "You're first! 🎉" : `You buzzed — #${msg.place}`;
+    }
+  });
+
+  ws.addEventListener('close', () => {
+    statusEl.textContent = 'Disconnected. Refresh to rejoin.';
+    buzzBtn.disabled = true;
+  });
+}
+
+function setUnlocked(open) {
+  if (open && !hasBuzzedThisClue) {
+    buzzBtn.disabled = false;
+    statusEl.textContent = 'Buzz in!';
+  } else if (open && hasBuzzedThisClue) {
+    statusEl.textContent = 'Buzz in!';
+  } else {
+    buzzBtn.disabled = true;
+    statusEl.textContent = 'Waiting for the host to open a clue...';
+  }
+}
+
+buzzBtn.addEventListener('click', () => {
+  if (buzzBtn.disabled || !ws) return;
+  ws.send(JSON.stringify({ type: 'buzz' }));
+});
+</script>
+</body>
+</html>

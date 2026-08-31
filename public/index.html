@@ -39,6 +39,76 @@
   ::selection { background: var(--gold); color: #111; }
   button { font-family: inherit; }
 
+  /* ---------- Host login ---------- */
+  #hostLoginView {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+  }
+  #hostLoginView h1 {
+    font-family: 'Fredoka', sans-serif;
+    color: var(--gold);
+    font-size: 48px;
+    margin: 0;
+    text-shadow: 0 3px 0 #7a5a00;
+  }
+  .login-box { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 300px; }
+  .login-box input {
+    background: var(--card);
+    color: white;
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 15px;
+    font-family: inherit;
+  }
+  .login-box input:focus { outline: none; border-color: var(--gold); }
+  #hostLoginError { color: var(--red); font-size: 13px; min-height: 16px; text-align: center; }
+
+  /* ---------- Lobby / buzz UI ---------- */
+  #lobbyBar {
+    font-size: 13px;
+    color: var(--muted);
+    text-align: center;
+  }
+  #lobbyBar b { color: var(--gold); }
+  #buzzPanel {
+    width: 100%;
+    max-width: 420px;
+    margin: 18px auto 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  #buzzPanel .buzz-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: rgba(255,255,255,0.06);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 15px;
+  }
+  #buzzPanel .buzz-row:first-child { background: rgba(255, 213, 74, 0.18); border: 1px solid var(--gold); }
+  #buzzPanel .buzz-row .place { font-family: 'Fredoka', sans-serif; color: var(--gold); font-weight: 600; margin-right: 10px; }
+  #buzzPanel .buzz-row .ms { color: var(--muted); font-size: 12px; }
+  #buzzControls { display: flex; gap: 10px; margin-top: 18px; }
+  #buzzControls button {
+    background: #3a4384;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 16px;
+    cursor: pointer;
+    font-weight: 600;
+    font-family: 'Fredoka', sans-serif;
+    transition: filter 0.15s ease;
+  }
+  #buzzControls button:hover { filter: brightness(1.2); }
+
   /* ---------- Home / menu screen ---------- */
   #homeView {
     flex: 1;
@@ -510,9 +580,20 @@
 </head>
 <body>
 
-<!-- ===== HOME ===== -->
-<div id="homeView">
+<!-- ===== HOST LOGIN ===== -->
+<div id="hostLoginView">
   <h1>🟦 Jeopardy</h1>
+  <div class="login-box">
+    <input id="hostPasswordInput" type="password" placeholder="Host password" />
+    <button class="big-btn" id="hostLoginBtn">Start Hosting</button>
+    <div id="hostLoginError"></div>
+  </div>
+</div>
+
+<!-- ===== HOME ===== -->
+<div id="homeView" class="hidden">
+  <h1>🟦 Jeopardy</h1>
+  <div id="lobbyBar"></div>
   <div class="home-actions">
     <button class="big-btn" id="newGameBtn">+ New Game</button>
   </div>
@@ -549,6 +630,10 @@
   <div id="overlayImages"></div>
   <div id="overlayAnswer"></div>
   <div id="overlayHint">Click anywhere to reveal the answer</div>
+  <div id="buzzPanel"></div>
+  <div id="buzzControls">
+    <button id="resetBuzzBtn">Reset Buzzers</button>
+  </div>
 </div>
 
 <script>
@@ -560,10 +645,67 @@ let teams = [];
 let currentClue = null;   // {ci, ri, tileEl}
 let editingGame = null;   // in-memory game object being edited
 let editingOriginalName = null;
+let ws = null;             // host's realtime buzzer connection
+
+// ---------------- Host login + realtime buzzing ----------------
+document.getElementById('hostLoginBtn').addEventListener('click', hostLogin);
+document.getElementById('hostPasswordInput').addEventListener('keydown', e => { if (e.key === 'Enter') hostLogin(); });
+
+async function hostLogin() {
+  const password = document.getElementById('hostPasswordInput').value;
+  const errEl = document.getElementById('hostLoginError');
+  errEl.textContent = '';
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'host', password })
+    });
+    const result = await res.json();
+    if (!res.ok) { errEl.textContent = result.error || 'Login failed'; return; }
+    connectWs(result.token);
+    showView('homeView');
+    loadGameList();
+  } catch (err) {
+    errEl.textContent = 'Could not reach server';
+  }
+}
+
+function connectWs(token) {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+  ws.addEventListener('message', (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'lobby') renderLobby(msg.players);
+    else if (msg.type === 'queue') renderBuzzPanel(msg.queue);
+  });
+}
+
+function sendWs(obj) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+
+function renderLobby(players) {
+  const bar = document.getElementById('lobbyBar');
+  bar.innerHTML = players.length
+    ? `<b>${players.length}</b> player${players.length === 1 ? '' : 's'} connected: ${players.map(escapeHtml).join(', ')}`
+    : 'No players connected yet — share this server\'s address and the game password from <code>config.json</code>.';
+}
+
+function renderBuzzPanel(queue) {
+  const panel = document.getElementById('buzzPanel');
+  panel.innerHTML = '';
+  queue.forEach((entry, idx) => {
+    const row = document.createElement('div');
+    row.className = 'buzz-row';
+    row.innerHTML = `<span><span class="place">#${idx + 1}</span>${escapeHtml(entry.name)}</span><span class="ms">${entry.ms}ms</span>`;
+    panel.appendChild(row);
+  });
+}
 
 // ---------------- View switching ----------------
 function showView(id) {
-  ['homeView', 'editorView', 'boardView'].forEach(v => {
+  ['hostLoginView', 'homeView', 'editorView', 'boardView'].forEach(v => {
     document.getElementById(v).classList.toggle('hidden', v !== id);
   });
 }
@@ -922,11 +1064,14 @@ function openClue(ci, ri, tileEl) {
   ansEl.textContent = clue.answer;
   document.getElementById('overlayHint').style.display = 'block';
 
+  renderBuzzPanel([]);
+  sendWs({ type: 'open', clueId: `${ci}-${ri}` });
+
   document.getElementById('overlay').classList.add('show');
 }
 
 document.getElementById('overlay').addEventListener('click', (e) => {
-  if (e.target.id === 'closeOverlay') return;
+  if (e.target.id === 'closeOverlay' || e.target.closest('#buzzControls')) return;
   const ansEl = document.getElementById('overlayAnswer');
   if (ansEl.style.display !== 'block') {
     ansEl.style.display = 'block';
@@ -940,7 +1085,14 @@ document.getElementById('closeOverlay').addEventListener('click', () => {
     currentClue.tileEl.textContent = '';
   }
   document.getElementById('overlay').classList.remove('show');
+  sendWs({ type: 'close' });
   currentClue = null;
+});
+
+document.getElementById('resetBuzzBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  renderBuzzPanel([]);
+  sendWs({ type: 'reset' });
 });
 
 function renderScoreboard() {
@@ -985,8 +1137,6 @@ document.getElementById('addTeamBtn').addEventListener('click', () => {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
-
-loadGameList();
 </script>
 </body>
 </html>

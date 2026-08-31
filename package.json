@@ -10,5 +10,8 @@
   },
   "devDependencies": {
     "pkg": "^5.8.1"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
   }
 }

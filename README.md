@@ -8,11 +8,12 @@ Download the latest `CustomJeopardy-win-x64.zip` from the [Releases page](https:
 
 ## Setup from source (any OS)
 
-You need [Node.js](https://nodejs.org/) installed (no other dependencies required).
+You need [Node.js](https://nodejs.org/) installed.
 
 ```bash
 git clone https://github.com/nicole-creech/Jeopardy.git
 cd Jeopardy
+npm install
 node server.js
 ```
 
@@ -30,7 +31,16 @@ Then open **http://localhost:3000** in your browser.
 
 Games are saved as JSON files in the `games/` folder, so you can keep as many custom boards as you want and reuse them for future game nights.
 
-## Building the .exe yourself
+## Realtime buzzing (experimental — `feature/realtime-buzzing` branch)
+
+If you host `server.js` somewhere reachable by your friends (not just `localhost`), players can join from their own phone/laptop and buzz in for real instead of over Discord voice:
+
+1. Set your own passwords in `config.json` (`playerPassword` and `hostPassword` — defaults are `jeopardy` / `hostpass`, change them before hosting publicly).
+2. Whoever runs the server opens `http://<server-address>:3000/` and logs in with the **host password**. This connects them to the live buzzer session and unlocks the usual board/editor.
+3. Players open `http://<server-address>:3000/play.html`, enter their name and the **player password**, and get a big BUZZ button.
+4. When the host opens a clue, every player's buzzer unlocks at the same moment. The host sees a live, ranked list of who buzzed and how fast (in ms) right inside the clue overlay, and can hit **Reset Buzzers** to reopen buzzing (e.g. after a wrong answer) without changing the clue.
+
+This is an early pass — there's no reconnect/session-recovery handling yet, and scoring still has to be entered manually from the buzz order shown to the host.
 
 ```bash
 npm run build:exe
