@@ -818,6 +818,8 @@ let lobbyPlayers = [];     // currently connected players, for the Daily Double 
 let activeWager = null;    // wager amount in play for the current Daily Double, or null
 let usedClueIds = new Set(); // server's record of which clues are already used, for this game
 let currentGameName = null;  // name of the game currently loaded on the board
+let pendingHostClueState = null; // buzz/DD state for a clue that's already open, waiting on `data` to load after reconnect
+let lastBuzzLog = null;      // most recent buzz_log payload — re-applied after a reconnect rebuild clobbers the panel
 
 // ---------------- View switching ----------------
 function showView(id) {
@@ -924,11 +926,17 @@ function attachWsMessageHandler(socket) {
   socket.addEventListener('message', (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'lobby') renderLobby(msg.players);
-    else if (msg.type === 'buzz_log') renderBuzzPanel(msg.entries, msg.winner, msg.excludedPlayers);
-    else if (msg.type === 'dd_state') renderDdState(msg);
+    else if (msg.type === 'buzz_log') { lastBuzzLog = msg; renderBuzzPanel(msg.entries, msg.winner, msg.excludedPlayers); }
+    else if (msg.type === 'dd_state') { renderDdState(msg); handleHostReconnectState(msg); }
     else if (msg.type === 'teams_state') { roomTeams = msg.teams; renderScoreboard(); }
     else if (msg.type === 'game_state') handleGameState(msg);
     else if (msg.type === 'room_closed') handleRoomClosed();
+    // These three only ever reach the host as part of the on-(re)connect state sync
+    // (live judging happens through buzz_log/dd_state instead) — they're how a host who
+    // refreshed, navigated away, or dropped mid-clue gets the judging overlay back.
+    else if (msg.type === 'buzzer_idle') { pendingHostClueState = null; }
+    else if (msg.type === 'buzzer_open') handleHostReconnectState({ ...msg, mode: 'open' });
+    else if (msg.type === 'buzzer_locked') handleHostReconnectState({ ...msg, mode: 'locked' });
   });
 }
 
@@ -952,6 +960,7 @@ async function handleGameState(msg) {
   if (!msg.name) return;
   if (msg.name === currentGameName && data) {
     renderBoard();
+    applyPendingHostClueState();
     return;
   }
   const res = await fetch('/api/games/' + encodeURIComponent(msg.name));
@@ -962,6 +971,65 @@ async function handleGameState(msg) {
   renderBoard();
   renderScoreboard();
   showView('boardView');
+  applyPendingHostClueState();
+}
+
+// A host who reconnects (refresh, menu-and-back, dropped connection) mid-clue would
+// otherwise land on the bare board with no way to judge — the server still knows a
+// clue/DD is live, but the client's overlay state was only ever built locally when
+// *this* browser triggered host_open. These messages (buzzer_open/locked, dd_state)
+// double as that on-connect signal, so rebuild the overlay from them once `data` is loaded.
+function handleHostReconnectState(msg) {
+  if (msg.mode) {
+    if (!msg.clueId) return;
+    pendingHostClueState = { clueId: msg.clueId, mode: msg.mode, answerRevealed: msg.answerRevealed };
+  } else {
+    if (!msg.active || !msg.clueId) { pendingHostClueState = null; return; }
+    pendingHostClueState = { clueId: msg.clueId, mode: 'dd', revealed: msg.revealed, wager: msg.wager, answerRevealed: msg.answerRevealed };
+  }
+  applyPendingHostClueState();
+}
+
+function findTileEl(ci, ri) {
+  const rows = document.querySelectorAll('#board .row');
+  const row = rows[ri + 1]; // row 0 is the category header row
+  return row ? row.children[ci] : null;
+}
+
+function applyPendingHostClueState() {
+  if (!pendingHostClueState || !data) return;
+  const state = pendingHostClueState;
+  pendingHostClueState = null;
+  const [ci, ri] = state.clueId.split('-').map(Number);
+  const cat = data.categories[ci];
+  const clue = cat && cat.clues[ri];
+  if (!clue) return;
+
+  currentClue = { ci, ri, tileEl: findTileEl(ci, ri) };
+
+  if (state.mode === 'dd' && !state.revealed) {
+    activeWager = null;
+    document.getElementById('normalClueContent').classList.add('hidden');
+    document.getElementById('dailyDoubleOverlay').classList.remove('hidden');
+    renderScoreboard();
+    document.getElementById('overlay').classList.add('show');
+    return;
+  }
+
+  activeWager = state.mode === 'dd' ? state.wager : null;
+  document.getElementById('dailyDoubleOverlay').classList.add('hidden');
+  document.getElementById('normalClueContent').classList.remove('hidden');
+  showClueContent(clue);
+  if (state.answerRevealed) {
+    document.getElementById('overlayAnswer').style.display = 'block';
+    document.getElementById('overlayAnswerImages').classList.toggle('hidden', !(clue.answerImages && clue.answerImages.length));
+    document.getElementById('overlayHint').style.display = 'none';
+  }
+  // showClueContent() above wipes the buzz panel/judge UI as if the clue just opened —
+  // reapply whatever buzz_log already told us (it can arrive before this does on reconnect).
+  if (lastBuzzLog) renderBuzzPanel(lastBuzzLog.entries, lastBuzzLog.winner, lastBuzzLog.excludedPlayers);
+  renderScoreboard();
+  document.getElementById('overlay').classList.add('show');
 }
 
 function handleRoomClosed() {

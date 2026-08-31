@@ -59,6 +59,14 @@ function recordLoginFailure(ip) {
 function recordLoginSuccess(ip) {
   loginAttempts.delete(ip);
 }
+// Room creation has no "wrong password" concept to hang a rate limit off of — every
+// creation counts against the limit directly, so a script spinning up rooms still gets capped.
+function recordAttempt(ip) {
+  let entry = loginAttempts.get(ip);
+  if (!entry) { entry = { count: 0, windowStart: Date.now(), lockedUntil: 0 }; loginAttempts.set(ip, entry); }
+  entry.count++;
+  if (entry.count >= LOGIN_MAX_ATTEMPTS) entry.lockedUntil = Date.now() + LOGIN_LOCKOUT_MS;
+}
 
 const MIME = {
   '.html': 'text/html',
@@ -237,6 +245,10 @@ function hostAdjustScore(room, playerId, amount) {
 function hostRemoveTeam(room, playerId) {
   room.teams.delete(playerId);
   broadcastTeamsState(room);
+  // If that player is still connected, their own client is otherwise stuck showing
+  // a stale score — tell them directly since they're no longer in the teams broadcast.
+  const target = [...room.clients].find(c => !c.isHost && c.id === playerId);
+  if (target) sendOwnScore(room, target);
 }
 
 // Records which game the host is playing and resets used-clue tracking only when it's
@@ -302,10 +314,13 @@ function broadcastDdState(room) {
   broadcastHost(room, {
     type: 'dd_state',
     active: room.dd.active,
+    clueId: room.dd.clueId,
     playerId: room.dd.playerId,
     playerName: room.dd.playerName,
     maxWager: room.dd.maxWager,
-    wager: room.dd.wager
+    wager: room.dd.wager,
+    revealed: room.dd.revealed,
+    answerRevealed: room.buzz.answerRevealed
   });
 }
 
@@ -323,9 +338,9 @@ function sendRoomState(room, client) {
   } else if (!room.buzz.clueId) {
     sendTo(client, { type: 'buzzer_idle' });
   } else if (room.buzz.locked && room.buzz.winner) {
-    sendTo(client, { type: 'buzzer_locked', winnerId: room.buzz.winner.id, winnerName: room.buzz.winner.name });
+    sendTo(client, { type: 'buzzer_locked', clueId: room.buzz.clueId, answerRevealed: room.buzz.answerRevealed, winnerId: room.buzz.winner.id, winnerName: room.buzz.winner.name });
   } else if (room.buzz.open) {
-    sendTo(client, { type: 'buzzer_open', excluded: client.isHost ? undefined : room.buzz.excludedPlayers.has(client.id) });
+    sendTo(client, { type: 'buzzer_open', clueId: room.buzz.clueId, answerRevealed: room.buzz.answerRevealed, excluded: client.isHost ? undefined : room.buzz.excludedPlayers.has(client.id) });
   } else {
     sendTo(client, { type: 'buzzer_idle' });
   }
@@ -425,6 +440,7 @@ function hostRevealDdClue(room) {
   if (!room.dd.active || room.dd.wager === null || room.dd.revealed) return;
   room.dd.revealed = true;
   broadcastClueShown(room, room.dd.clueId, room.dd.wager);
+  broadcastDdState(room); // so a host reconnecting after the reveal knows to show the clue, not the waiting screen
 }
 
 // Wrong answer: exclude just that player for this clue and reopen — NOT a full
@@ -516,6 +532,7 @@ const server = http.createServer((req, res) => {
       const password = typeof payload.password === 'string' ? payload.password.slice(0, 100) : '';
       if (!password) return sendJson(res, 400, { error: 'Set a password for players to join with' });
 
+      recordAttempt(`create:${ip}`);
       const room = createRoom(password);
       const token = crypto.randomUUID();
       sessions.set(token, { id: 'host', name: 'Host', isHost: true, roomCode: room.code, expiresAt: Date.now() + SESSION_TTL_MS });
