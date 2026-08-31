@@ -132,7 +132,17 @@ function createRoom(password) {
     // Daily Double: no open buzzer — one designated player wagers, then answers.
     // The host picks maxWager (it already has the full game/score context); the server
     // just relays and enforces it, the same trust boundary the host already has over the room.
-    dd: { active: false, clueId: null, playerId: null, playerName: null, maxWager: 0, wager: null }
+    dd: { active: false, clueId: null, playerId: null, playerName: null, maxWager: 0, wager: null },
+    // Scoring lives here now (not just in the host's browser) so it survives the host
+    // navigating away/reconnecting, and so each player can see their own score.
+    // playerId -> { id, name, score }. Created when a player joins, kept even if they
+    // disconnect (so a reconnect doesn't lose their score) — only removed by explicit
+    // host action.
+    teams: new Map(),
+    // Tracks which game + which of its clues are already used, so the host reconnecting
+    // (menu navigation, refresh, dropped connection) can resume exactly where they left off
+    // instead of the board silently resetting.
+    game: { name: null, usedClueIds: new Set() }
   };
   rooms.set(code, room);
   return room;
@@ -191,6 +201,65 @@ function broadcastBuzzerOpen(room) {
   });
 }
 
+// Every connected player is their own scoreboard entry — created the moment they join,
+// kept (with their score) even if they disconnect, so a reconnect doesn't wipe it out.
+function ensurePlayerTeam(room, client) {
+  if (!room.teams.has(client.id)) {
+    room.teams.set(client.id, { id: client.id, name: client.name, score: 0 });
+  }
+}
+function broadcastTeamsState(room) {
+  broadcastHost(room, { type: 'teams_state', teams: [...room.teams.values()] });
+}
+// Players only ever see their own score, never anyone else's — same role-gating
+// principle as the buzzer (a player's client is never handed data it shouldn't have).
+function sendOwnScore(room, client) {
+  const team = room.teams.get(client.id);
+  sendTo(client, { type: 'your_score', score: team ? team.score : 0 });
+}
+function broadcastAllOwnScores(room) {
+  room.clients.forEach(c => { if (!c.isHost) sendOwnScore(room, c); });
+}
+
+function hostAdjustScore(room, playerId, amount) {
+  const team = room.teams.get(playerId);
+  if (!team) return;
+  const delta = Math.floor(Number(amount));
+  if (!Number.isFinite(delta)) return;
+  team.score += delta;
+  broadcastTeamsState(room);
+  broadcastAllOwnScores(room);
+}
+
+function hostRemoveTeam(room, playerId) {
+  room.teams.delete(playerId);
+  broadcastTeamsState(room);
+}
+
+// Records which game the host is playing and resets used-clue tracking only when it's
+// actually a *different* game — re-selecting the same in-progress game is a resume, not a restart.
+function hostSelectGame(room, name) {
+  if (room.game.name !== name) {
+    room.game.name = name;
+    room.game.usedClueIds = new Set();
+  }
+  sendGameState(room);
+}
+function sendGameState(room) {
+  broadcastHost(room, { type: 'game_state', name: room.game.name, usedClueIds: [...room.game.usedClueIds] });
+}
+
+// Closes the room entirely — every connected client (host included) is notified and
+// disconnected, and the room stops existing. Distinct from hostCloseClue, which just
+// finishes one clue.
+function closeRoomEntirely(room) {
+  room.clients.forEach(c => {
+    sendTo(c, { type: 'room_closed' });
+    try { c.ws.close(); } catch (e) {}
+  });
+  rooms.delete(room.code);
+}
+
 function broadcastDdState(room) {
   broadcastHost(room, {
     type: 'dd_state',
@@ -224,6 +293,10 @@ function sendRoomState(room, client) {
   }
   if (client.isHost) {
     broadcastArrivalLog(room);
+    broadcastTeamsState(room);
+    sendGameState(room);
+  } else {
+    sendOwnScore(room, client);
   }
 }
 
@@ -299,6 +372,10 @@ function hostReopenAll(room) {
 
 // Correct answer, or host just closing out the clue — buzzing goes idle until the next clue.
 function hostCloseClue(room) {
+  if (room.buzz.clueId) {
+    room.game.usedClueIds.add(room.buzz.clueId);
+    sendGameState(room);
+  }
   room.buzz.clueId = null;
   room.buzz.open = false;
   room.buzz.locked = false;
@@ -475,11 +552,13 @@ wss.on('connection', (ws, req, session, room) => {
   const client = { ws, id: session.id, name: session.name, isHost: session.isHost };
   room.clients.add(client);
   room.lastActivity = Date.now();
+  if (!client.isHost) ensurePlayerTeam(room, client);
 
   // Reconnect handling: whatever's currently happening, tell this client right away
   // so it's never showing stale UI (e.g. a buzzer that looks open when it's actually locked).
   sendRoomState(room, client);
   broadcastLobby(room);
+  if (!client.isHost) broadcastTeamsState(room);
 
   ws.on('message', (raw) => {
     room.lastActivity = Date.now();
@@ -495,6 +574,10 @@ wss.on('connection', (ws, req, session, room) => {
       else if (msg.type === 'host_judge' && msg.result === 'correct') hostCloseClue(room);
       else if (msg.type === 'host_reopen_all') hostReopenAll(room);
       else if (msg.type === 'host_close') hostCloseClue(room);
+      else if (msg.type === 'host_select_game' && typeof msg.name === 'string') hostSelectGame(room, msg.name);
+      else if (msg.type === 'host_adjust_score' && typeof msg.playerId === 'string') hostAdjustScore(room, msg.playerId, msg.amount);
+      else if (msg.type === 'host_remove_team' && typeof msg.playerId === 'string') hostRemoveTeam(room, msg.playerId);
+      else if (msg.type === 'host_close_room') closeRoomEntirely(room);
       return;
     }
 

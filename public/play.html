@@ -87,6 +87,15 @@
     color: var(--muted);
     text-align: center;
   }
+  #myScore {
+    font-size: 14px;
+    color: var(--muted);
+  }
+  #myScore b {
+    font-family: 'Fredoka', sans-serif;
+    color: var(--gold);
+    font-size: 20px;
+  }
   #buzzBtn {
     width: min(80vw, 320px);
     height: min(80vw, 320px);
@@ -179,6 +188,7 @@
 </div>
 
 <div id="playView" class="hidden">
+  <div id="myScore">Your score: <b id="myScoreValue">0</b></div>
   <div id="status">Waiting for the host to open a clue...</div>
   <button id="buzzBtn" disabled>BUZZ</button>
   <div id="buzzResult"></div>
@@ -220,6 +230,8 @@ if (presetRoom) roomInput.value = presetRoom.toUpperCase();
 document.getElementById('loginBtn').addEventListener('click', login);
 document.getElementById('passwordInput').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
 
+const PLAYER_SESSION_KEY = 'jeopardy_player_session';
+
 async function login() {
   const roomCode = roomInput.value.trim().toUpperCase();
   const name = document.getElementById('nameInput').value.trim();
@@ -236,17 +248,32 @@ async function login() {
     });
     const result = await res.json();
     if (!res.ok) { loginError.textContent = result.error || 'Could not join'; return; }
+    try { localStorage.setItem(PLAYER_SESSION_KEY, JSON.stringify({ token: result.token })); } catch (e) {}
     connect(result.token);
   } catch (err) {
     loginError.textContent = 'Could not reach server';
   }
 }
 
-function connect(token) {
+// Resume an existing session (e.g. the page reloaded) instead of making the player
+// re-type the room code/name/password every time — their score lives on the server
+// either way, but this avoids the annoyance of logging back in.
+function tryResumeSession() {
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(PLAYER_SESSION_KEY) || 'null'); } catch (e) { saved = null; }
+  if (!saved || !saved.token) return;
+  connect(saved.token, /* isResume */ true);
+}
+
+function connect(token, isResume) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+  let opened = false;
+  let roomClosedByHost = false;
 
   ws.addEventListener('open', () => {
+    opened = true;
+    try { localStorage.setItem(PLAYER_SESSION_KEY, JSON.stringify({ token })); } catch (e) {}
     loginView.classList.add('hidden');
     playView.classList.remove('hidden');
   });
@@ -289,10 +316,26 @@ function connect(token) {
       wagerForm.classList.add('hidden');
       wagerLockedText.classList.remove('hidden');
       wagerLockedText.textContent = 'Wager locked in — good luck!';
+    } else if (msg.type === 'your_score') {
+      document.getElementById('myScoreValue').textContent = msg.score;
+    } else if (msg.type === 'room_closed') {
+      roomClosedByHost = true;
+      try { localStorage.removeItem(PLAYER_SESSION_KEY); } catch (e) {}
+      statusEl.textContent = 'The host closed this game.';
+      buzzBtn.disabled = true;
+      loginView.classList.add('hidden');
+      playView.classList.remove('hidden');
+      wagerView.classList.add('hidden');
     }
   });
 
   ws.addEventListener('close', () => {
+    if (roomClosedByHost) return; // that message already set the right status — don't stomp on it
+    if (!opened && isResume) {
+      // Saved session no longer valid (room gone/expired) — fall back to the login form.
+      try { localStorage.removeItem(PLAYER_SESSION_KEY); } catch (e) {}
+      return;
+    }
     statusEl.textContent = 'Disconnected. Refresh to rejoin.';
     buzzBtn.disabled = true;
   });
@@ -342,6 +385,8 @@ buzzBtn.addEventListener('click', () => {
   if (buzzBtn.disabled || !ws) return;
   ws.send(JSON.stringify({ type: 'buzz' }));
 });
+
+tryResumeSession();
 </script>
 </body>
 </html>

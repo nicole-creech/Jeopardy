@@ -95,6 +95,16 @@
     font-size: 12px;
   }
   #copyRoomLinkBtn:hover { filter: brightness(1.2); }
+  #closeRoomBtn {
+    background: linear-gradient(180deg, var(--red), var(--red-dark));
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  #closeRoomBtn:hover { filter: brightness(1.15); }
   #lobbyBar { font-size: 13px; color: var(--muted); text-align: center; }
   #lobbyBar b { color: var(--gold); }
   #buzzPanel {
@@ -558,17 +568,19 @@
     flex-shrink: 0;
     box-shadow: 0 4px 12px rgba(0,0,0,0.25);
   }
-  .team input.name {
-    background: transparent;
-    border: none;
+  .team .name {
     color: white;
     font-weight: 600;
     font-size: 14px;
     width: 100%;
     margin-bottom: 6px;
     font-family: inherit;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .team input.name:focus { outline: none; }
+  #scoreboardEmpty { color: var(--muted); font-size: 13px; padding: 8px; }
   .team .score {
     font-family: 'Fredoka', sans-serif;
     font-size: 24px;
@@ -609,20 +621,6 @@
     font-size: 11px;
     padding: 4px;
   }
-  #addTeamBtn {
-    font-family: 'Fredoka', sans-serif;
-    background: linear-gradient(180deg, var(--gold-soft), var(--gold));
-    color: #1a1400;
-    border: none;
-    border-radius: 8px;
-    padding: 10px 16px;
-    font-weight: 600;
-    cursor: pointer;
-    flex-shrink: 0;
-    box-shadow: 0 4px 10px rgba(0,0,0,0.25);
-    transition: transform 0.15s ease, filter 0.15s ease;
-  }
-  #addTeamBtn:hover { transform: translateY(-1px); filter: brightness(1.05); }
 
   #overlay {
     position: fixed;
@@ -737,6 +735,7 @@
     &nbsp;·&nbsp;
     <a id="roomShareLink" href="#" target="_blank">Player link</a>
     <button id="copyRoomLinkBtn" type="button">Copy link</button>
+    <button id="closeRoomBtn" type="button">Close room</button>
   </div>
   <div id="lobbyBar"></div>
   <div class="home-actions">
@@ -766,7 +765,6 @@
   </div>
   <div id="board"></div>
   <div id="scoreboard"></div>
-  <button id="addTeamBtn">+ Add Team</button>
 </div>
 
 <div id="overlay">
@@ -810,7 +808,7 @@ const NUM_CLUES_DEFAULT = 5;
 const VALUE_STEPS = [200, 400, 600, 800, 1000];
 
 let data = null;          // currently loaded/played game
-let teams = [];
+let roomTeams = [];       // scoreboard entries — one per connected player, server-authoritative
 let currentClue = null;   // {ci, ri, tileEl}
 let editingGame = null;   // in-memory game object being edited
 let editingOriginalName = null;
@@ -818,6 +816,8 @@ let ws = null;             // host's realtime buzzer connection
 let buzzWinnerId = null;   // id of whoever currently holds the buzz for the open clue
 let lobbyPlayers = [];     // currently connected players, for the Daily Double picker
 let activeWager = null;    // wager amount in play for the current Daily Double, or null
+let usedClueIds = new Set(); // server's record of which clues are already used, for this game
+let currentGameName = null;  // name of the game currently loaded on the board
 
 // ---------------- View switching ----------------
 function showView(id) {
@@ -829,6 +829,8 @@ function showView(id) {
 // ---------------- Room creation (hosting) + realtime buzzer ----------------
 document.getElementById('hostLoginBtn').addEventListener('click', createGame);
 document.getElementById('hostPasswordInput').addEventListener('keydown', e => { if (e.key === 'Enter') createGame(); });
+
+const HOST_SESSION_KEY = 'jeopardy_host_session';
 
 async function createGame() {
   const password = document.getElementById('hostPasswordInput').value;
@@ -843,6 +845,7 @@ async function createGame() {
     });
     const result = await res.json();
     if (!res.ok) { errEl.textContent = result.error || 'Could not create game'; return; }
+    try { localStorage.setItem(HOST_SESSION_KEY, JSON.stringify({ token: result.token, roomCode: result.roomCode })); } catch (e) {}
     connectWs(result.token);
     showRoomInfo(result.roomCode);
     showView('homeView');
@@ -850,6 +853,32 @@ async function createGame() {
   } catch (err) {
     errEl.textContent = 'Could not reach server';
   }
+}
+
+// If this browser already has a live host session (e.g. the page was refreshed, or the
+// tab reloaded), reconnect straight to it instead of making the host click "Create Game"
+// again — which would otherwise spin up a brand new room and strand any connected players.
+function tryResumeHostSession() {
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(HOST_SESSION_KEY) || 'null'); } catch (e) { saved = null; }
+  if (!saved || !saved.token) return;
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const probe = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(saved.token)}`);
+  let settled = false;
+
+  probe.addEventListener('open', () => {
+    settled = true;
+    ws = probe;
+    attachWsMessageHandler(ws);
+    showRoomInfo(saved.roomCode);
+    showView('homeView');
+    loadGameList();
+  });
+  probe.addEventListener('close', () => {
+    if (settled) return; // a later, unrelated close — the real session, not this probe attempt
+    try { localStorage.removeItem(HOST_SESSION_KEY); } catch (e) {}
+  });
 }
 
 function showRoomInfo(roomCode) {
@@ -872,14 +901,34 @@ document.getElementById('copyRoomLinkBtn').addEventListener('click', async () =>
   } catch (e) { /* clipboard permissions vary by browser — link is still selectable/visible */ }
 });
 
+document.getElementById('closeRoomBtn').addEventListener('click', () => {
+  const btn = document.getElementById('closeRoomBtn');
+  if (btn.dataset.confirming === '1') {
+    sendWs({ type: 'host_close_room' });
+  } else {
+    btn.dataset.confirming = '1';
+    btn.textContent = 'Confirm?';
+    setTimeout(() => {
+      if (btn.isConnected) { btn.dataset.confirming = '0'; btn.textContent = 'Close room'; }
+    }, 3000);
+  }
+});
+
 function connectWs(token) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
-  ws.addEventListener('message', (ev) => {
+  attachWsMessageHandler(ws);
+}
+
+function attachWsMessageHandler(socket) {
+  socket.addEventListener('message', (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'lobby') renderLobby(msg.players);
     else if (msg.type === 'buzz_log') renderBuzzPanel(msg.entries, msg.winner, msg.excludedPlayers);
     else if (msg.type === 'dd_state') renderDdState(msg);
+    else if (msg.type === 'teams_state') { roomTeams = msg.teams; renderScoreboard(); }
+    else if (msg.type === 'game_state') handleGameState(msg);
+    else if (msg.type === 'room_closed') handleRoomClosed();
   });
 }
 
@@ -890,9 +939,35 @@ function sendWs(obj) {
 function renderLobby(players) {
   lobbyPlayers = players;
   const bar = document.getElementById('lobbyBar');
-  bar.innerHTML = players.length
-    ? `<b>${players.length}</b> player${players.length === 1 ? '' : 's'} connected: ${players.map(p => escapeHtml(p.name)).join(', ')}`
-    : 'No players connected yet — share this server\'s address and the game password from <code>config.json</code>.';
+  bar.textContent = players.length
+    ? `${players.length} player${players.length === 1 ? '' : 's'} connected: ${players.map(p => p.name).join(', ')}`
+    : 'No players connected';
+}
+
+// The server is the source of truth for which game is loaded and which clues are used —
+// this fires on every (re)connect, so refreshing the page or coming back from the menu
+// resumes exactly where the host left off instead of losing progress.
+async function handleGameState(msg) {
+  usedClueIds = new Set(msg.usedClueIds || []);
+  if (!msg.name) return;
+  if (msg.name === currentGameName && data) {
+    renderBoard();
+    return;
+  }
+  const res = await fetch('/api/games/' + encodeURIComponent(msg.name));
+  if (!res.ok) return;
+  data = normalizeGame(await res.json());
+  currentGameName = msg.name;
+  document.getElementById('boardTitle').textContent = data.title || 'Jeopardy';
+  renderBoard();
+  renderScoreboard();
+  showView('boardView');
+}
+
+function handleRoomClosed() {
+  try { localStorage.removeItem(HOST_SESSION_KEY); } catch (e) {}
+  alert('This room has been closed.');
+  location.reload();
 }
 
 // Reflects the server's authoritative Daily Double state in the host's DD picker overlay:
@@ -1363,17 +1438,12 @@ document.getElementById('playFromEditorBtn').addEventListener('click', async () 
 });
 
 // ---------------- Board ----------------
+// Selecting a game just tells the server which one — the actual board only loads once
+// the server echoes back game_state (handleGameState), which is also what makes
+// resuming an in-progress game work the same way whether you clicked Play, clicked
+// Menu and came back, or reconnected after a dropped connection.
 async function playGame(name) {
-  const res = await fetch('/api/games/' + encodeURIComponent(name));
-  data = normalizeGame(await res.json());
-  document.getElementById('boardTitle').textContent = data.title || 'Jeopardy';
-  teams = [
-    { name: 'Team 1', score: 0 },
-    { name: 'Team 2', score: 0 }
-  ];
-  renderBoard();
-  renderScoreboard();
-  showView('boardView');
+  sendWs({ type: 'host_select_game', name });
 }
 
 function renderBoard() {
@@ -1400,8 +1470,13 @@ function renderBoard() {
       const tile = document.createElement('div');
       tile.className = 'tile';
       if (clue) {
-        tile.textContent = '$' + clue.value;
-        tile.addEventListener('click', () => openClue(ci, r, tile));
+        const clueId = `${ci}-${r}`;
+        if (usedClueIds.has(clueId)) {
+          tile.classList.add('used');
+        } else {
+          tile.textContent = '$' + clue.value;
+          tile.addEventListener('click', () => openClue(ci, r, tile));
+        }
       } else {
         tile.classList.add('empty');
       }
@@ -1547,14 +1622,22 @@ function currentHalfValue() {
   return Math.round(currentClueValue() / 2);
 }
 
+// Scoreboard entries are the actual connected players (one per player, auto-created
+// server-side on join) — no more generic "Team 1/2" the host has to name manually.
+// Every click here just tells the server what happened; the displayed score always
+// comes back from the server's teams_state broadcast, so it can't drift out of sync.
 function renderScoreboard() {
   const board = document.getElementById('scoreboard');
   board.innerHTML = '';
-  teams.forEach((team, idx) => {
+  if (!roomTeams.length) {
+    board.innerHTML = '<div id="scoreboardEmpty">No players connected yet</div>';
+    return;
+  }
+  roomTeams.forEach((team) => {
     const el = document.createElement('div');
     el.className = 'team';
     el.innerHTML = `
-      <input class="name" value="${escapeHtml(team.name)}" />
+      <div class="name">${escapeHtml(team.name)}</div>
       <div class="score">${team.score}</div>
       <div class="btns">
         <button class="minus">-${currentClueValue()}</button>
@@ -1570,49 +1653,36 @@ function renderScoreboard() {
       </div>
       <button class="remove">remove</button>
     `;
-    el.querySelector('.name').addEventListener('input', (e) => {
-      teams[idx].name = e.target.value;
-    });
     el.querySelector('.plus').addEventListener('click', () => {
-      teams[idx].score += currentClueValue();
-      renderScoreboard();
+      sendWs({ type: 'host_adjust_score', playerId: team.id, amount: currentClueValue() });
     });
     el.querySelector('.minus').addEventListener('click', () => {
-      teams[idx].score -= currentClueValue();
-      renderScoreboard();
+      sendWs({ type: 'host_adjust_score', playerId: team.id, amount: -currentClueValue() });
     });
     el.querySelector('.plus-half-value').addEventListener('click', () => {
-      teams[idx].score += currentHalfValue();
-      renderScoreboard();
+      sendWs({ type: 'host_adjust_score', playerId: team.id, amount: currentHalfValue() });
     });
     el.querySelector('.minus-half-value').addEventListener('click', () => {
-      teams[idx].score -= currentHalfValue();
-      renderScoreboard();
+      sendWs({ type: 'host_adjust_score', playerId: team.id, amount: -currentHalfValue() });
     });
     el.querySelector('.plus-fine').addEventListener('click', () => {
-      teams[idx].score += 100;
-      renderScoreboard();
+      sendWs({ type: 'host_adjust_score', playerId: team.id, amount: 100 });
     });
     el.querySelector('.minus-fine').addEventListener('click', () => {
-      teams[idx].score -= 100;
-      renderScoreboard();
+      sendWs({ type: 'host_adjust_score', playerId: team.id, amount: -100 });
     });
     el.querySelector('.remove').addEventListener('click', () => {
-      teams.splice(idx, 1);
-      renderScoreboard();
+      sendWs({ type: 'host_remove_team', playerId: team.id });
     });
     board.appendChild(el);
   });
 }
 
-document.getElementById('addTeamBtn').addEventListener('click', () => {
-  teams.push({ name: 'Team ' + (teams.length + 1), score: 0 });
-  renderScoreboard();
-});
-
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+
+tryResumeHostSession();
 </script>
 </body>
 </html>

@@ -28,7 +28,8 @@ Then open **http://localhost:3000** in your browser.
   - **Answer** — what the host reveals after the clue
   - **Clue Media (optional)** and **Answer Media (optional)** — click the box then paste (Ctrl+V), drag-and-drop, or click **Browse files…** to attach images, GIFs, video clips, or audio clips (any mix, multiple per clue). Clue media shows right away; answer media stays hidden until the answer is revealed. Dragging an image straight from a webpage works too, not just local files. Video/audio clips are capped at 25MB each since — unlike images — they can't be auto-compressed.
   - Save with **Save Game**, or **Save & Play** to jump straight into the board
-- **Board** — click a tile to show its value/images, click again to reveal the answer, then close it and award points to a team from the scoreboard at the bottom. Three tiers of scoring buttons: the main +/- match the open clue's full value, a middle ½ row gives exactly half that (a quick way to award partial credit), and a small +100/-100 row handles fine manual corrections. Add/remove teams as needed.
+- **Board** — click a tile to show its value/images, click again to reveal the answer, then close it and award points from the scoreboard at the bottom. Three tiers of scoring buttons: the main +/- match the open clue's full value, a middle ½ row gives exactly half that (a quick way to award partial credit), and a small +100/-100 row handles fine manual corrections.
+  - Without the realtime buzzer connected (running purely from `localhost` with no one logged in as a player), the scoreboard has no entries to score — the realtime buzzer section below covers the normal way to play.
 
 Games are saved as JSON files in the `games/` folder, so you can keep as many custom boards as you want and reuse them for future game nights.
 
@@ -44,8 +45,10 @@ If you run `server.js` somewhere your friends can reach (not just `localhost`), 
    - **Wrong** excludes just that player and reopens the buzzer for everyone else on the same clue (so someone who's already gotten it wrong can't buzz in again on that clue, but nobody else who hasn't tried yet is penalized).
    - **Reopen buzzer (clear exclusions)** is a manual override if you need to undo an exclusion and let everyone try again.
 5. If a player's connection drops and reconnects mid-clue, they're brought back up to date automatically rather than showing a stale buzzer.
+6. Each connected player is automatically their own scoreboard entry (named after them — no more generic "Team 1/2"), created the moment they join. The host can still award/deduct points on any entry directly; players only ever see their own score, never anyone else's.
+7. The host can click **Close room** (next to the room code) to end the game entirely — every connected player is notified and disconnected, and the room stops existing.
 
-The server is the single source of truth for buzz order and who's excluded — player devices never decide this themselves, so a slow or manipulated client can't jump the line.
+The server is the single source of truth for buzz order, scores, and who's excluded — player devices never decide this themselves, so a slow or manipulated client can't jump the line. The room itself also holds which game is loaded and which clues are already used, so a host reconnecting — a page refresh, a dropped connection, or just clicking "← Menu" and coming back — resumes exactly where they left off instead of the board resetting.
 
 ### Daily Double
 
