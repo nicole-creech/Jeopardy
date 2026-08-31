@@ -3,15 +3,24 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
+const { createGamesStore } = require('./gamesStore');
 
-const PORT = 3000;
+// Render (and most hosts) assign the port via env var — 3000 is just the local-dev default.
+const PORT = process.env.PORT || 3000;
 // When packaged with pkg, __dirname points inside a virtual snapshot — use the
 // real exe's folder instead so public/ and games/ resolve to files on disk.
 const BASE_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
 const PUBLIC_DIR = path.join(BASE_DIR, 'public');
 const GAMES_DIR = path.join(BASE_DIR, 'games');
 
-if (!fs.existsSync(GAMES_DIR)) fs.mkdirSync(GAMES_DIR, { recursive: true });
+// Postgres (via DATABASE_URL, e.g. Render's managed Postgres) when available — a hosted
+// service's disk gets wiped on redeploy/restart, so saved games can't just live in games/
+// the way they do for local/exe use. Falls back to that same games/ folder otherwise.
+const gamesStore = createGamesStore({
+  gamesDir: GAMES_DIR,
+  templateSeedPath: path.join(GAMES_DIR, 'template.json'),
+  databaseUrl: process.env.DATABASE_URL
+});
 
 // Constant-time-ish password comparison — a plain === leaks how many leading
 // characters matched via response timing. Not bulletproof, but cheap insurance
@@ -385,21 +394,21 @@ const server = http.createServer((req, res) => {
 
   // List saved games
   if (reqPath === '/api/games' && req.method === 'GET') {
-    const files = fs.readdirSync(GAMES_DIR).filter(f => f.endsWith('.json'));
-    return sendJson(res, 200, files.map(f => f.replace(/\.json$/, '')));
+    return gamesStore.listGames()
+      .then(names => sendJson(res, 200, names))
+      .catch(() => sendJson(res, 500, { error: 'Failed to list games' }));
   }
 
   // Load a specific game
   if (reqPath.startsWith('/api/games/') && req.method === 'GET') {
     const name = safeGameName(decodeURIComponent(reqPath.slice('/api/games/'.length)));
     if (!name) return sendJson(res, 400, { error: 'Invalid game name' });
-    const filePath = path.join(GAMES_DIR, name + '.json');
-    if (!fs.existsSync(filePath)) return sendJson(res, 404, { error: 'Game not found' });
-    return fs.readFile(filePath, (err, data) => {
-      if (err) return sendJson(res, 500, { error: 'Failed to read game' });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(data);
-    });
+    return gamesStore.loadGame(name)
+      .then(game => {
+        if (!game) return sendJson(res, 404, { error: 'Game not found' });
+        sendJson(res, 200, game);
+      })
+      .catch(() => sendJson(res, 500, { error: 'Failed to read game' }));
   }
 
   // Save (create or overwrite) a game
@@ -412,11 +421,9 @@ const server = http.createServer((req, res) => {
       if (!payload.game || !Array.isArray(payload.game.categories)) {
         return sendJson(res, 400, { error: 'Invalid game data' });
       }
-      const filePath = path.join(GAMES_DIR, name + '.json');
-      fs.writeFile(filePath, JSON.stringify(payload.game, null, 2), (err) => {
-        if (err) return sendJson(res, 500, { error: 'Failed to save game' });
-        sendJson(res, 200, { ok: true, name });
-      });
+      gamesStore.saveGame(name, payload.game)
+        .then(() => sendJson(res, 200, { ok: true, name }))
+        .catch(() => sendJson(res, 500, { error: 'Failed to save game' }));
     });
   }
 
@@ -424,11 +431,12 @@ const server = http.createServer((req, res) => {
   if (reqPath.startsWith('/api/games/') && req.method === 'DELETE') {
     const name = safeGameName(decodeURIComponent(reqPath.slice('/api/games/'.length)));
     if (!name || name === 'template') return sendJson(res, 400, { error: 'Cannot delete this game' });
-    const filePath = path.join(GAMES_DIR, name + '.json');
-    fs.unlink(filePath, (err) => {
-      if (err) return sendJson(res, 404, { error: 'Game not found' });
-      sendJson(res, 200, { ok: true });
-    });
+    gamesStore.deleteGame(name)
+      .then(deleted => {
+        if (!deleted) return sendJson(res, 404, { error: 'Game not found' });
+        sendJson(res, 200, { ok: true });
+      })
+      .catch(() => sendJson(res, 500, { error: 'Failed to delete game' }));
     return;
   }
 
@@ -501,16 +509,24 @@ wss.on('connection', (ws, req, session, room) => {
   });
 });
 
-server.listen(PORT, () => {
-  const url = `http://localhost:${PORT}`;
-  console.log(`Jeopardy board running at ${url}`);
+gamesStore.init()
+  .then(() => {
+    console.log(`Games storage: ${gamesStore.backend}${gamesStore.backend === 'postgres' ? ' (DATABASE_URL)' : ` (${GAMES_DIR})`}`);
+    server.listen(PORT, () => {
+      const url = `http://localhost:${PORT}`;
+      console.log(`Jeopardy board running at ${url}`);
 
-  // When double-clicked as a packaged exe, open the browser automatically
-  if (process.pkg) {
-    const { exec } = require('child_process');
-    const openCmd = process.platform === 'win32' ? `start "" "${url}"`
-      : process.platform === 'darwin' ? `open "${url}"`
-      : `xdg-open "${url}"`;
-    exec(openCmd);
-  }
-});
+      // When double-clicked as a packaged exe, open the browser automatically
+      if (process.pkg) {
+        const { exec } = require('child_process');
+        const openCmd = process.platform === 'win32' ? `start "" "${url}"`
+          : process.platform === 'darwin' ? `open "${url}"`
+          : `xdg-open "${url}"`;
+        exec(openCmd);
+      }
+    });
+  })
+  .catch(err => {
+    console.error('Failed to initialize games storage:', err);
+    process.exit(1);
+  });

@@ -8,11 +8,12 @@ Download the latest `CustomJeopardy-win-x64.zip` from the [Releases page](https:
 
 ## Setup from source (any OS)
 
-You need [Node.js](https://nodejs.org/) installed (no other dependencies required).
+You need [Node.js](https://nodejs.org/) installed.
 
 ```bash
 git clone https://github.com/nicole-creech/Jeopardy.git
 cd Jeopardy
+npm install
 node server.js
 ```
 
@@ -66,6 +67,24 @@ This is a party-game login, not a real auth system — it's deliberately simple,
 - Room passwords are only ever compared against the specific room they were set for — no cross-room password reuse or leakage.
 
 What it still isn't: rooms live in server memory only (a server restart wipes every active game — there's no database behind this), there's no individual player accounts or real kick capability beyond the host closing a clue, and this has no protection against a determined attacker who controls the network path (always run it behind `https`/`wss` if you're exposing it publicly). Good enough for a game night with friends, not for anything you'd bet real money on.
+
+## Deploying (Render)
+
+Rooms/buzzer state are intentionally in-memory only, but **saved games need to survive a redeploy** — Render's disk is wiped on every restart, so `games/` alone won't cut it there. `server.js` already handles this: if a `DATABASE_URL` env var is present, saved games go to Postgres instead of the filesystem; if it's absent, it behaves exactly like local/`.exe` use (plain `games/` folder). No code changes needed either way — it's auto-detected at startup.
+
+**1. Web service**
+- On [render.com](https://render.com): **New → Web Service**, connect this GitHub repo.
+- Build Command: `npm install`
+- Start Command: `node server.js` (or `npm start`, same thing)
+- Free tier is fine to start. Render terminates TLS for you, so the app's `wss://` connections work automatically — nothing to configure for that.
+
+**2. Database (recommended — otherwise saved games vanish on every redeploy)**
+- In the same Render dashboard: **New → PostgreSQL**. Free tier works.
+- Open your web service's **Environment** tab → **Add Environment Variable** → pick **Add from Database**, select the Postgres instance. Render wires up `DATABASE_URL` automatically (also reachable manually under the database's **Connect** tab if you'd rather set it by hand).
+- Redeploy the web service so it picks up the new env var. On startup it creates its one `games` table itself (`CREATE TABLE IF NOT EXISTS`) and seeds the `template` game — no manual migration step.
+- From then on, every save/delete from the editor goes straight to Postgres, so it survives redeploys, restarts, and the free tier's idle spin-down.
+
+That's the whole "small database" — one table (`name`, `data` as JSONB, `updated_at`), no ORM, no migrations tooling. `gamesStore.js` is the abstraction if you ever want to swap it for something else.
 
 ## Building the .exe yourself
 
