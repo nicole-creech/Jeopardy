@@ -26,7 +26,7 @@ Then open **http://localhost:3000** in your browser.
   - **Answer** — what the host reveals after the clue
   - **Clue Media (optional)** and **Answer Media (optional)** — click the box then paste (Ctrl+V), drag-and-drop, or click **Browse files…** to attach images, GIFs, video clips, or audio clips (any mix, multiple per clue). Clue media shows right away; answer media stays hidden until the answer is revealed. Dragging an image straight from a webpage works too, not just local files. Video/audio clips are capped at 25MB each since — unlike images — they can't be auto-compressed.
   - Save with **Save Game**, or **Save & Play** to jump straight into the board
-- **Board** — click a tile to show its value/images, click again to reveal the answer, then close it and award points to a team from the scoreboard at the bottom. Add/remove teams as needed.
+- **Board** — click a tile to show its value/images, click again to reveal the answer, then close it and award points to a team from the scoreboard at the bottom. The main +/- buttons match the open clue's value; smaller +100/-100 buttons below them let you give partial credit or make manual corrections. Add/remove teams as needed.
 
 Games are saved as JSON files in the `games/` folder, so you can keep as many custom boards as you want and reuse them for future game nights.
 

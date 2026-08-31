@@ -450,6 +450,7 @@
     margin-bottom: 6px;
   }
   .team .btns { display: flex; gap: 6px; justify-content: center; }
+  .team .btns.half { margin-top: 4px; }
   .team button {
     flex: 1;
     padding: 5px;
@@ -459,9 +460,12 @@
     font-weight: 600;
     transition: filter 0.15s ease;
   }
+  .team .btns.half button { padding: 3px; font-size: 11px; opacity: 0.85; }
   .team button:hover { filter: brightness(1.15); }
   .team .plus { background: linear-gradient(180deg, var(--green), var(--green-dark)); color: white; }
   .team .minus { background: linear-gradient(180deg, var(--red), var(--red-dark)); color: white; }
+  .team .plus-half { background: linear-gradient(180deg, #2f8f5a, #1c5e3b); color: white; }
+  .team .minus-half { background: linear-gradient(180deg, #b04a4d, #7c3335); color: white; }
   .team .remove {
     display: block;
     width: 100%;
@@ -1071,6 +1075,7 @@ function openClue(ci, ri, tileEl) {
   if (tileEl.classList.contains('used')) return;
   const clue = data.categories[ci].clues[ri];
   currentClue = { ci, ri, tileEl };
+  renderScoreboard();
 
   document.getElementById('overlayValue').textContent = '$' + clue.value;
   renderMediaList('overlayImages', clue.images);
@@ -1131,6 +1136,7 @@ document.getElementById('closeOverlay').addEventListener('click', () => {
   pauseAllOverlayMedia();
   document.getElementById('overlay').classList.remove('show');
   currentClue = null;
+  renderScoreboard();
 });
 
 function renderScoreboard() {
@@ -1143,8 +1149,12 @@ function renderScoreboard() {
       <input class="name" value="${escapeHtml(team.name)}" />
       <div class="score">${team.score}</div>
       <div class="btns">
-        <button class="minus">-200</button>
-        <button class="plus">+200</button>
+        <button class="minus">-${currentClue ? data.categories[currentClue.ci].clues[currentClue.ri].value : 200}</button>
+        <button class="plus">+${currentClue ? data.categories[currentClue.ci].clues[currentClue.ri].value : 200}</button>
+      </div>
+      <div class="btns half">
+        <button class="minus-half">-100</button>
+        <button class="plus-half">+100</button>
       </div>
       <button class="remove">remove</button>
     `;
@@ -1157,6 +1167,14 @@ function renderScoreboard() {
     });
     el.querySelector('.minus').addEventListener('click', () => {
       teams[idx].score -= currentClue ? data.categories[currentClue.ci].clues[currentClue.ri].value : 200;
+      renderScoreboard();
+    });
+    el.querySelector('.plus-half').addEventListener('click', () => {
+      teams[idx].score += 100;
+      renderScoreboard();
+    });
+    el.querySelector('.minus-half').addEventListener('click', () => {
+      teams[idx].score -= 100;
       renderScoreboard();
     });
     el.querySelector('.remove').addEventListener('click', () => {
