@@ -10,16 +10,8 @@ const PORT = 3000;
 const BASE_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
 const PUBLIC_DIR = path.join(BASE_DIR, 'public');
 const GAMES_DIR = path.join(BASE_DIR, 'games');
-const CONFIG_PATH = path.join(BASE_DIR, 'config.json');
 
 if (!fs.existsSync(GAMES_DIR)) fs.mkdirSync(GAMES_DIR, { recursive: true });
-
-let config = { playerPassword: 'jeopardy', hostPassword: 'hostpass' };
-try {
-  config = { ...config, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) };
-} catch (e) {
-  console.warn('No config.json found (or invalid) — using default passwords. Copy config.example.json to config.json to set your own.');
-}
 
 // Constant-time-ish password comparison — a plain === leaks how many leading
 // characters matched via response timing. Not bulletproof, but cheap insurance
@@ -91,264 +83,303 @@ function readBody(req, cb) {
   req.on('end', () => cb(body));
 }
 
-// ---------------- Realtime buzzer room ----------------
-// Single-room model — this app is one host running one game at a time.
-// token -> { id, name, isHost, expiresAt }
+// ---------------- Realtime buzzer rooms (multi-room) ----------------
+// Anyone can create a room and set its player password on the spot — there's no
+// site-wide host gate. Each room is fully independent: its own buzzer/DD state and
+// its own set of connected clients.
+// token -> { id, name, isHost, roomCode, expiresAt }
 const sessions = new Map();
-// live sockets: Set of { ws, id, name, isHost }
-const clients = new Set();
+// roomCode -> room state (see createRoom)
+const rooms = new Map();
 
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h — long enough for one game night, not forever
+const ROOM_MAX_IDLE_MS = 6 * 60 * 60 * 1000;       // absolute safety net
+const ROOM_EMPTY_GRACE_MS = 15 * 60 * 1000;        // how long an empty room is kept around (reconnects)
+
+const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I — easy to read aloud
+function generateRoomCode() {
+  let code;
+  do {
+    code = Array.from({ length: 5 }, () => ROOM_CODE_CHARS[Math.floor(Math.random() * ROOM_CODE_CHARS.length)]).join('');
+  } while (rooms.has(code));
+  return code;
+}
+
+function createRoom(password) {
+  const code = generateRoomCode();
+  const room = {
+    code,
+    password,
+    clients: new Set(),
+    lastActivity: Date.now(),
+    buzz: {
+      clueId: null,          // which clue is currently live, or null between clues
+      open: false,           // true only while buzzing is currently accepted
+      locked: false,         // true once a winner has buzzed for this clue attempt
+      winner: null,            // { id, name } of the current buzz winner, or null
+      excludedPlayers: new Set(), // playerIds locked out for the *current* clueId (wrong answers)
+      arrivalLog: []          // ordered log of every valid buzz this clue, for the host panel
+    },
+    // Daily Double: no open buzzer — one designated player wagers, then answers.
+    // The host picks maxWager (it already has the full game/score context); the server
+    // just relays and enforces it, the same trust boundary the host already has over the room.
+    dd: { active: false, clueId: null, playerId: null, playerName: null, maxWager: 0, wager: null }
+  };
+  rooms.set(code, room);
+  return room;
+}
 
 // A stable identity per player name (not a fresh random id every login) so a
-// reconnect — or someone hitting /api/login twice from two tabs — doesn't let a
+// reconnect — or someone hitting /api/join twice from two tabs — doesn't let a
 // just-excluded player dodge Daily Double/wrong-answer exclusion by "logging in again".
-// Names collide case-insensitively; fine for a casual party game, not multi-tenant.
+// Names collide case-insensitively within a room; fine for a casual party game.
 function idForPlayer(name) {
   return 'player:' + name.trim().toLowerCase();
 }
 
-// Sessions don't get much traffic in this app, so a slow periodic sweep is plenty —
-// no need for anything fancier to keep the map from growing unbounded over a long uptime.
+// Slow periodic sweep — this app doesn't see enough traffic to need anything fancier,
+// just enough to keep memory from growing unbounded on a long-running deployment.
 setInterval(() => {
   const now = Date.now();
   for (const [token, session] of sessions) {
     if (session.expiresAt < now) sessions.delete(token);
   }
-}, 30 * 60 * 1000).unref();
-
-// Server-authoritative buzz state. Never trust a client's own timing/identity —
-// arrival order and "who buzzed" are both decided here, from the server's own
-// message-arrival order (Node's event loop serializes this for us) and the
-// identity tied to the client's authenticated session, not anything the client sends.
-const room = {
-  clueId: null,          // which clue is currently live, or null between clues
-  open: false,           // true only while buzzing is currently accepted
-  locked: false,         // true once a winner has buzzed for this clue attempt
-  winner: null,           // { id, name } of the current buzz winner, or null
-  excludedPlayers: new Set(), // playerIds locked out for the *current* clueId (wrong answers)
-  arrivalLog: []          // ordered log of every valid buzz this clue, for the host panel
-};
-
-// Daily Double: no open buzzer — one designated player wagers, then answers.
-// The host picks maxWager (it already has the full game/score context); the server just
-// relays it and enforces it, the same trust boundary the host already has over the room.
-const dd = {
-  active: false,
-  clueId: null,
-  playerId: null,
-  playerName: null,
-  maxWager: 0,
-  wager: null
-};
+  for (const [code, room] of rooms) {
+    const idleTooLong = now - room.lastActivity > ROOM_MAX_IDLE_MS;
+    const emptyTooLong = room.clients.size === 0 && now - room.lastActivity > ROOM_EMPTY_GRACE_MS;
+    if (idleTooLong || emptyTooLong) rooms.delete(code);
+  }
+}, 5 * 60 * 1000).unref();
 
 function sendTo(client, obj) {
   if (client.ws.readyState === 1) client.ws.send(JSON.stringify(obj));
 }
-function broadcastHost(obj) {
-  clients.forEach(c => { if (c.isHost) sendTo(c, obj); });
+function broadcastHost(room, obj) {
+  room.clients.forEach(c => { if (c.isHost) sendTo(c, obj); });
 }
-function broadcastPlayers(obj) {
-  clients.forEach(c => { if (!c.isHost) sendTo(c, obj); });
+function broadcastPlayers(room, obj) {
+  room.clients.forEach(c => { if (!c.isHost) sendTo(c, obj); });
 }
-function broadcastLobby() {
-  const players = [...clients].filter(c => !c.isHost).map(c => ({ id: c.id, name: c.name }));
-  broadcastHost({ type: 'lobby', players });
+function broadcastLobby(room) {
+  const players = [...room.clients].filter(c => !c.isHost).map(c => ({ id: c.id, name: c.name }));
+  broadcastHost(room, { type: 'lobby', players });
 }
-function broadcastArrivalLog() {
+function broadcastArrivalLog(room) {
   // entries is the full history for this clue (including already-judged-wrong buzzes);
   // winner/excludedPlayers tell the host which entry, if any, is actually pending judgment.
-  broadcastHost({
+  broadcastHost(room, {
     type: 'buzz_log',
-    entries: room.arrivalLog,
-    winner: room.winner,
-    excludedPlayers: [...room.excludedPlayers]
+    entries: room.buzz.arrivalLog,
+    winner: room.buzz.winner,
+    excludedPlayers: [...room.buzz.excludedPlayers]
   });
 }
 // Exclusion is per-player, so "buzzer is open" can't be one identical broadcast —
 // each player needs to be told whether *they specifically* are excluded this clue.
-function broadcastBuzzerOpen() {
-  clients.forEach(c => {
-    if (!c.isHost) sendTo(c, { type: 'buzzer_open', excluded: room.excludedPlayers.has(c.id) });
+function broadcastBuzzerOpen(room) {
+  room.clients.forEach(c => {
+    if (!c.isHost) sendTo(c, { type: 'buzzer_open', excluded: room.buzz.excludedPlayers.has(c.id) });
   });
 }
 
-function broadcastDdState() {
-  broadcastHost({
+function broadcastDdState(room) {
+  broadcastHost(room, {
     type: 'dd_state',
-    active: dd.active,
-    playerId: dd.playerId,
-    playerName: dd.playerName,
-    maxWager: dd.maxWager,
-    wager: dd.wager
+    active: room.dd.active,
+    playerId: room.dd.playerId,
+    playerName: room.dd.playerName,
+    maxWager: room.dd.maxWager,
+    wager: room.dd.wager
   });
 }
 
 // Sends whatever the room's current state is to one client — used both right after
 // login and on reconnect, so a client's UI is never stale about what's going on.
-function sendRoomState(client) {
-  if (dd.active) {
+function sendRoomState(room, client) {
+  if (room.dd.active) {
     if (client.isHost) {
-      broadcastDdState();
-    } else if (client.id === dd.playerId) {
-      sendTo(client, dd.wager === null ? { type: 'wager_prompt', maxWager: dd.maxWager } : { type: 'wager_locked' });
+      broadcastDdState(room);
+    } else if (client.id === room.dd.playerId) {
+      sendTo(client, room.dd.wager === null ? { type: 'wager_prompt', maxWager: room.dd.maxWager } : { type: 'wager_locked' });
     } else {
-      sendTo(client, { type: 'dd_in_progress', playerName: dd.playerName });
+      sendTo(client, { type: 'dd_in_progress', playerName: room.dd.playerName });
     }
-  } else if (!room.clueId) {
+  } else if (!room.buzz.clueId) {
     sendTo(client, { type: 'buzzer_idle' });
-  } else if (room.locked && room.winner) {
-    sendTo(client, { type: 'buzzer_locked', winnerId: room.winner.id, winnerName: room.winner.name });
-  } else if (room.open) {
-    sendTo(client, { type: 'buzzer_open', excluded: client.isHost ? undefined : room.excludedPlayers.has(client.id) });
+  } else if (room.buzz.locked && room.buzz.winner) {
+    sendTo(client, { type: 'buzzer_locked', winnerId: room.buzz.winner.id, winnerName: room.buzz.winner.name });
+  } else if (room.buzz.open) {
+    sendTo(client, { type: 'buzzer_open', excluded: client.isHost ? undefined : room.buzz.excludedPlayers.has(client.id) });
   } else {
     sendTo(client, { type: 'buzzer_idle' });
   }
   if (client.isHost) {
-    broadcastArrivalLog();
+    broadcastArrivalLog(room);
   }
 }
 
-function hostOpenClue(clueId) {
-  dd.active = false;
-  room.clueId = clueId;
-  room.open = true;
-  room.locked = false;
-  room.winner = null;
-  room.excludedPlayers = new Set();
-  room.arrivalLog = [];
-  broadcastBuzzerOpen();
-  broadcastArrivalLog();
+function hostOpenClue(room, clueId) {
+  room.dd.active = false;
+  room.buzz.clueId = clueId;
+  room.buzz.open = true;
+  room.buzz.locked = false;
+  room.buzz.winner = null;
+  room.buzz.excludedPlayers = new Set();
+  room.buzz.arrivalLog = [];
+  broadcastBuzzerOpen(room);
+  broadcastArrivalLog(room);
 }
 
 // Daily Double: no open buzzer for everyone — one designated player wagers, then answers.
-function hostOpenDailyDouble(clueId, playerId, maxWager) {
-  const target = [...clients].find(c => !c.isHost && c.id === playerId);
+function hostOpenDailyDouble(room, clueId, playerId, maxWager) {
+  const target = [...room.clients].find(c => !c.isHost && c.id === playerId);
   if (!target) return;
-  room.clueId = clueId;
-  room.open = false;
-  room.locked = false;
-  room.winner = null;
-  room.excludedPlayers = new Set();
-  room.arrivalLog = [];
-  dd.active = true;
-  dd.clueId = clueId;
-  dd.playerId = target.id;
-  dd.playerName = target.name;
-  dd.maxWager = Math.max(0, Math.floor(Number(maxWager)) || 0);
-  dd.wager = null;
-  sendTo(target, { type: 'wager_prompt', maxWager: dd.maxWager });
-  clients.forEach(c => {
-    if (!c.isHost && c.id !== target.id) sendTo(c, { type: 'dd_in_progress', playerName: dd.playerName });
+  room.buzz.clueId = clueId;
+  room.buzz.open = false;
+  room.buzz.locked = false;
+  room.buzz.winner = null;
+  room.buzz.excludedPlayers = new Set();
+  room.buzz.arrivalLog = [];
+  room.dd.active = true;
+  room.dd.clueId = clueId;
+  room.dd.playerId = target.id;
+  room.dd.playerName = target.name;
+  room.dd.maxWager = Math.max(0, Math.floor(Number(maxWager)) || 0);
+  room.dd.wager = null;
+  sendTo(target, { type: 'wager_prompt', maxWager: room.dd.maxWager });
+  room.clients.forEach(c => {
+    if (!c.isHost && c.id !== target.id) sendTo(c, { type: 'dd_in_progress', playerName: room.dd.playerName });
   });
-  broadcastDdState();
+  broadcastDdState(room);
 }
 
-function handlePlayerWager(client, amount) {
-  if (!dd.active || client.id !== dd.playerId || dd.wager !== null) return;
+function handlePlayerWager(room, client, amount) {
+  if (!room.dd.active || client.id !== room.dd.playerId || room.dd.wager !== null) return;
   const wager = Math.max(0, Math.floor(Number(amount)) || 0);
-  dd.wager = Math.min(wager, dd.maxWager);
+  room.dd.wager = Math.min(wager, room.dd.maxWager);
   sendTo(client, { type: 'wager_locked' });
-  broadcastDdState();
+  broadcastDdState(room);
 }
 
 // Wrong answer: exclude just that player for this clue and reopen — NOT a full
 // reset, so anyone else who already got it wrong earlier on this same clue stays excluded.
-function hostMarkWrong() {
-  if (!room.winner) return;
-  room.excludedPlayers.add(room.winner.id);
-  room.winner = null;
-  room.locked = false;
-  room.open = true;
-  broadcastPlayers({ type: 'buzzer_reset', excludedPlayers: [...room.excludedPlayers] });
-  broadcastBuzzerOpen();
-  broadcastArrivalLog();
+function hostMarkWrong(room) {
+  if (!room.buzz.winner) return;
+  room.buzz.excludedPlayers.add(room.buzz.winner.id);
+  room.buzz.winner = null;
+  room.buzz.locked = false;
+  room.buzz.open = true;
+  broadcastPlayers(room, { type: 'buzzer_reset', excludedPlayers: [...room.buzz.excludedPlayers] });
+  broadcastBuzzerOpen(room);
+  broadcastArrivalLog(room);
 }
 
 // Manual escape hatch: clear all exclusions/log on the current clue and reopen fresh
 // (e.g. the host fat-fingered a judgment). Distinct from hostMarkWrong's targeted reopen.
-function hostReopenAll() {
-  if (!room.clueId) return;
-  room.open = true;
-  room.locked = false;
-  room.winner = null;
-  room.excludedPlayers = new Set();
-  room.arrivalLog = [];
-  broadcastPlayers({ type: 'buzzer_reset', excludedPlayers: [] });
-  broadcastBuzzerOpen();
-  broadcastArrivalLog();
+function hostReopenAll(room) {
+  if (!room.buzz.clueId) return;
+  room.buzz.open = true;
+  room.buzz.locked = false;
+  room.buzz.winner = null;
+  room.buzz.excludedPlayers = new Set();
+  room.buzz.arrivalLog = [];
+  broadcastPlayers(room, { type: 'buzzer_reset', excludedPlayers: [] });
+  broadcastBuzzerOpen(room);
+  broadcastArrivalLog(room);
 }
 
 // Correct answer, or host just closing out the clue — buzzing goes idle until the next clue.
-function hostCloseClue() {
-  room.clueId = null;
-  room.open = false;
-  room.locked = false;
-  room.winner = null;
-  room.excludedPlayers = new Set();
-  room.arrivalLog = [];
-  dd.active = false;
-  dd.clueId = null;
-  dd.playerId = null;
-  dd.playerName = null;
-  dd.wager = null;
-  broadcastPlayers({ type: 'buzzer_idle' });
-  broadcastArrivalLog();
+function hostCloseClue(room) {
+  room.buzz.clueId = null;
+  room.buzz.open = false;
+  room.buzz.locked = false;
+  room.buzz.winner = null;
+  room.buzz.excludedPlayers = new Set();
+  room.buzz.arrivalLog = [];
+  room.dd.active = false;
+  room.dd.clueId = null;
+  room.dd.playerId = null;
+  room.dd.playerName = null;
+  room.dd.wager = null;
+  broadcastPlayers(room, { type: 'buzzer_idle' });
+  broadcastArrivalLog(room);
 }
 
-function handlePlayerBuzz(client) {
+function handlePlayerBuzz(room, client) {
   const ms = Date.now();
-  if (!room.open || room.locked) {
+  if (!room.buzz.open || room.buzz.locked) {
     sendTo(client, { type: 'buzz_ack', status: 'not_open' });
     return;
   }
-  if (room.excludedPlayers.has(client.id)) {
+  if (room.buzz.excludedPlayers.has(client.id)) {
     sendTo(client, { type: 'buzz_ack', status: 'excluded' });
     return;
   }
   // First valid buzz wins — Node's single-threaded event loop processes incoming
   // WS messages one at a time, so there's no race condition to guard against here.
-  room.locked = true;
-  room.winner = { id: client.id, name: client.name };
-  room.arrivalLog.push({ id: client.id, name: client.name, ms, late: false });
+  room.buzz.locked = true;
+  room.buzz.winner = { id: client.id, name: client.name };
+  room.buzz.arrivalLog.push({ id: client.id, name: client.name, ms, late: false });
   sendTo(client, { type: 'buzz_ack', status: 'winner' });
-  broadcastPlayers({ type: 'buzzer_locked', winnerId: client.id, winnerName: client.name });
-  broadcastArrivalLog();
+  broadcastPlayers(room, { type: 'buzzer_locked', winnerId: client.id, winnerName: client.name });
+  broadcastArrivalLog(room);
 }
 
 const server = http.createServer((req, res) => {
   const reqPath = req.url.split('?')[0];
 
-  // Login: issue a session token for either a player or the host
-  if (reqPath === '/api/login' && req.method === 'POST') {
+  // Create a room: anyone can host — they just pick the password players will use to join.
+  if (reqPath === '/api/rooms' && req.method === 'POST') {
     const ip = req.socket.remoteAddress || 'unknown';
-    const limit = checkLoginRateLimit(ip);
+    const limit = checkLoginRateLimit(`create:${ip}`);
     if (!limit.allowed) {
       res.setHeader('Retry-After', Math.ceil(limit.retryAfterMs / 1000));
-      return sendJson(res, 429, { error: 'Too many attempts — try again in a few minutes.' });
+      return sendJson(res, 429, { error: 'Too many rooms created — try again in a few minutes.' });
     }
 
     return readBody(req, (body) => {
       let payload;
       try { payload = JSON.parse(body); } catch (e) { return sendJson(res, 400, { error: 'Invalid JSON' }); }
-      const role = payload.role === 'host' ? 'host' : 'player';
+      const password = typeof payload.password === 'string' ? payload.password.slice(0, 100) : '';
+      if (!password) return sendJson(res, 400, { error: 'Set a password for players to join with' });
+
+      const room = createRoom(password);
+      const token = crypto.randomUUID();
+      sessions.set(token, { id: 'host', name: 'Host', isHost: true, roomCode: room.code, expiresAt: Date.now() + SESSION_TTL_MS });
+      sendJson(res, 200, { token, name: 'Host', isHost: true, roomCode: room.code });
+    });
+  }
+
+  // Join a room as a player.
+  if (reqPath.startsWith('/api/rooms/') && reqPath.endsWith('/join') && req.method === 'POST') {
+    const ip = req.socket.remoteAddress || 'unknown';
+    const limit = checkLoginRateLimit(`join:${ip}`);
+    if (!limit.allowed) {
+      res.setHeader('Retry-After', Math.ceil(limit.retryAfterMs / 1000));
+      return sendJson(res, 429, { error: 'Too many attempts — try again in a few minutes.' });
+    }
+
+    const roomCode = decodeURIComponent(reqPath.slice('/api/rooms/'.length, -'/join'.length)).toUpperCase();
+    const room = rooms.get(roomCode);
+
+    return readBody(req, (body) => {
+      let payload;
+      try { payload = JSON.parse(body); } catch (e) { return sendJson(res, 400, { error: 'Invalid JSON' }); }
+      if (!room) return sendJson(res, 404, { error: 'Game not found — check the room code' });
+
       const password = typeof payload.password === 'string' ? payload.password : '';
-      const expected = role === 'host' ? config.hostPassword : config.playerPassword;
-      if (!safeEqual(password, expected)) {
-        recordLoginFailure(ip);
+      if (!safeEqual(password, room.password)) {
+        recordLoginFailure(`join:${ip}`);
         return sendJson(res, 401, { error: 'Incorrect password' });
       }
 
-      const name = role === 'host'
-        ? 'Host'
-        : (typeof payload.name === 'string' ? payload.name.trim().slice(0, 24) : '');
-      if (role === 'player' && !name) return sendJson(res, 400, { error: 'Enter a name' });
+      const name = typeof payload.name === 'string' ? payload.name.trim().slice(0, 24) : '';
+      if (!name) return sendJson(res, 400, { error: 'Enter a name' });
 
-      recordLoginSuccess(ip);
-      const id = role === 'host' ? 'host' : idForPlayer(name);
+      recordLoginSuccess(`join:${ip}`);
       const token = crypto.randomUUID();
-      sessions.set(token, { id, name, isHost: role === 'host', expiresAt: Date.now() + SESSION_TTL_MS });
-      sendJson(res, 200, { token, name, isHost: role === 'host' });
+      sessions.set(token, { id: idForPlayer(name), name, isHost: false, roomCode: room.code, expiresAt: Date.now() + SESSION_TTL_MS });
+      sendJson(res, 200, { token, name, isHost: false, roomCode: room.code });
     });
   }
 
@@ -425,43 +456,48 @@ server.on('upgrade', (req, socket, head) => {
   const token = url.searchParams.get('token');
   const session = sessions.get(token);
   if (!session || session.expiresAt < Date.now()) { socket.destroy(); return; }
+  const room = rooms.get(session.roomCode);
+  if (!room) { socket.destroy(); return; } // room expired/closed since login
   wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit('connection', ws, req, session);
+    wss.emit('connection', ws, req, session, room);
   });
 });
 
-wss.on('connection', (ws, req, session) => {
+wss.on('connection', (ws, req, session, room) => {
   const client = { ws, id: session.id, name: session.name, isHost: session.isHost };
-  clients.add(client);
+  room.clients.add(client);
+  room.lastActivity = Date.now();
 
   // Reconnect handling: whatever's currently happening, tell this client right away
   // so it's never showing stale UI (e.g. a buzzer that looks open when it's actually locked).
-  sendRoomState(client);
-  broadcastLobby();
+  sendRoomState(room, client);
+  broadcastLobby(room);
 
   ws.on('message', (raw) => {
+    room.lastActivity = Date.now();
     let msg;
     try { msg = JSON.parse(raw); } catch (e) { return; }
 
     if (client.isHost) {
-      if (msg.type === 'host_open' && typeof msg.clueId === 'string') hostOpenClue(msg.clueId);
+      if (msg.type === 'host_open' && typeof msg.clueId === 'string') hostOpenClue(room, msg.clueId);
       else if (msg.type === 'host_open_dd' && typeof msg.clueId === 'string' && typeof msg.playerId === 'string') {
-        hostOpenDailyDouble(msg.clueId, msg.playerId, msg.maxWager);
+        hostOpenDailyDouble(room, msg.clueId, msg.playerId, msg.maxWager);
       }
-      else if (msg.type === 'host_judge' && msg.result === 'wrong') hostMarkWrong();
-      else if (msg.type === 'host_judge' && msg.result === 'correct') hostCloseClue();
-      else if (msg.type === 'host_reopen_all') hostReopenAll();
-      else if (msg.type === 'host_close') hostCloseClue();
+      else if (msg.type === 'host_judge' && msg.result === 'wrong') hostMarkWrong(room);
+      else if (msg.type === 'host_judge' && msg.result === 'correct') hostCloseClue(room);
+      else if (msg.type === 'host_reopen_all') hostReopenAll(room);
+      else if (msg.type === 'host_close') hostCloseClue(room);
       return;
     }
 
-    if (msg.type === 'buzz') handlePlayerBuzz(client);
-    else if (msg.type === 'wager_submit') handlePlayerWager(client, msg.amount);
+    if (msg.type === 'buzz') handlePlayerBuzz(room, client);
+    else if (msg.type === 'wager_submit') handlePlayerWager(room, client, msg.amount);
   });
 
   ws.on('close', () => {
-    clients.delete(client);
-    broadcastLobby();
+    room.clients.delete(client);
+    room.lastActivity = Date.now();
+    broadcastLobby(room);
   });
 });
 

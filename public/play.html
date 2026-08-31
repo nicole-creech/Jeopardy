@@ -171,6 +171,7 @@
 
 <div id="loginView">
   <h1>🔔 Buzz In</h1>
+  <input id="roomInput" placeholder="Room code" maxlength="8" style="text-transform:uppercase" />
   <input id="nameInput" placeholder="Your name" maxlength="24" />
   <input id="passwordInput" type="password" placeholder="Game password" />
   <button id="loginBtn">Join</button>
@@ -211,23 +212,30 @@ const wagerSub = document.getElementById('wagerSub');
 const wagerSubmitBtn = document.getElementById('wagerSubmitBtn');
 const wagerLockedText = document.getElementById('wagerLockedText');
 
+// Pre-fill the room code from a shared link like /play.html?room=BLUE2
+const roomInput = document.getElementById('roomInput');
+const presetRoom = new URLSearchParams(location.search).get('room');
+if (presetRoom) roomInput.value = presetRoom.toUpperCase();
+
 document.getElementById('loginBtn').addEventListener('click', login);
 document.getElementById('passwordInput').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
 
 async function login() {
+  const roomCode = roomInput.value.trim().toUpperCase();
   const name = document.getElementById('nameInput').value.trim();
   const password = document.getElementById('passwordInput').value;
+  if (!roomCode) { loginError.textContent = 'Enter the room code'; return; }
   if (!name) { loginError.textContent = 'Enter a name'; return; }
   loginError.textContent = '';
 
   try {
-    const res = await fetch('/api/login', {
+    const res = await fetch(`/api/rooms/${encodeURIComponent(roomCode)}/join`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role: 'player', name, password })
+      body: JSON.stringify({ name, password })
     });
     const result = await res.json();
-    if (!res.ok) { loginError.textContent = result.error || 'Login failed'; return; }
+    if (!res.ok) { loginError.textContent = result.error || 'Could not join'; return; }
     connect(result.token);
   } catch (err) {
     loginError.textContent = 'Could not reach server';
