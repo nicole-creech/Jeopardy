@@ -1209,6 +1209,7 @@ async function handleGameState(msg) {
   if (!msg.name) return;
   if (msg.name === currentGameName && data) {
     renderBoard();
+    showView('boardView');
     applyPendingHostClueState();
     return;
   }
