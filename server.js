@@ -506,8 +506,12 @@ function hostRevealDdClue(room) {
 
 // Wrong answer: exclude just that player for this clue and reopen — NOT a full
 // reset, so anyone else who already got it wrong earlier on this same clue stays excluded.
+// Auto-deducts the clue's value from whoever's being judged; the host can still correct
+// the number afterward with the scoreboard's manual +/- buttons or the undo bar.
 function hostMarkWrong(room) {
   if (!room.buzz.winner) return;
+  const clue = findClue(room, room.buzz.clueId);
+  if (clue) hostAdjustScore(room, room.buzz.winner.id, -clue.value);
   room.buzz.excludedPlayers.add(room.buzz.winner.id);
   room.buzz.winner = null;
   room.buzz.locked = false;
@@ -531,6 +535,18 @@ function hostReopenAll(room) {
   broadcastPlayers(room, { type: 'buzzer_reset', excludedPlayers: [] });
   broadcastBuzzerOpen(room);
   broadcastArrivalLog(room);
+}
+
+// Correct answer: auto-awards the clue's value to whoever's holding the buzz, same
+// override story as hostMarkWrong — the host can adjust it after the fact if needed.
+// A plain host_close (no judgment — e.g. closing a Daily Double, or a clue nobody
+// buzzed on) goes straight to hostCloseClue instead, with no scoring side effect.
+function hostJudgeCorrect(room) {
+  if (room.buzz.winner) {
+    const clue = findClue(room, room.buzz.clueId);
+    if (clue) hostAdjustScore(room, room.buzz.winner.id, clue.value);
+  }
+  hostCloseClue(room);
 }
 
 // Correct answer, or host just closing out the clue — buzzing goes idle until the next clue.
@@ -740,7 +756,7 @@ wss.on('connection', (ws, req, session, room) => {
         hostOpenDailyDouble(room, msg.clueId, msg.playerId, msg.maxWager);
       }
       else if (msg.type === 'host_judge' && msg.result === 'wrong') hostMarkWrong(room);
-      else if (msg.type === 'host_judge' && msg.result === 'correct') hostCloseClue(room);
+      else if (msg.type === 'host_judge' && msg.result === 'correct') hostJudgeCorrect(room);
       else if (msg.type === 'host_reopen_all') hostReopenAll(room);
       else if (msg.type === 'host_close') hostCloseClue(room);
       else if (msg.type === 'host_select_game' && typeof msg.name === 'string') hostSelectGame(room, msg.name).catch(() => {});

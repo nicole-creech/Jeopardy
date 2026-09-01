@@ -1346,6 +1346,12 @@ function renderBuzzPanel(entries, winner, excludedPlayers) {
   buzzWinnerId = winner ? winner.id : null;
   if (winner) {
     document.getElementById('buzzWinner').textContent = `${winner.name} buzzed in — correct?`;
+    // Correct/Wrong auto-award/deduct the clue's value — shown here so the host knows
+    // what's about to happen before clicking (the scoreboard buttons still work anytime
+    // to override it, e.g. mid-timeout or after the fact).
+    const value = currentClueValue();
+    document.getElementById('judgeCorrectBtn').textContent = `✓ Correct (+${value})`;
+    document.getElementById('judgeWrongBtn').textContent = `✕ Wrong (-${value})`;
     judge.classList.remove('hidden');
   } else {
     judge.classList.add('hidden');
