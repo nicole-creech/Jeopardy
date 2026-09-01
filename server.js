@@ -644,6 +644,13 @@ const server = http.createServer((req, res) => {
         return sendJson(res, 401, { error: 'Incorrect password' });
       }
 
+      // Players can't join until the host has actually picked a game — otherwise they'd
+      // land in an empty room with nothing to look at, and their name wouldn't show up
+      // in the host's Daily Double picker until the host reconnects anyway.
+      if (!room.game.name) {
+        return sendJson(res, 409, { error: "The host hasn't started the game yet — try again in a moment." });
+      }
+
       const name = typeof payload.name === 'string' ? payload.name.trim().slice(0, 24) : '';
       if (!name) return sendJson(res, 400, { error: 'Enter a name' });
 

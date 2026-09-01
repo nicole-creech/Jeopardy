@@ -203,6 +203,24 @@
     font-size: 12px;
   }
   #closeRoomBtn:hover { filter: brightness(1.15); }
+  #closeRoomConfirm {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--ink);
+  }
+  #closeRoomYesBtn, #closeRoomCancelBtn {
+    border: none;
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  #closeRoomYesBtn { background: linear-gradient(180deg, var(--red), var(--red-dark)); color: white; }
+  #closeRoomCancelBtn { background: #3a4384; color: white; }
+  #closeRoomYesBtn:hover, #closeRoomCancelBtn:hover { filter: brightness(1.15); }
   #lobbyBar { font-size: 13px; color: var(--muted); text-align: center; }
   #lobbyBar b { color: var(--gold); }
   #buzzPanel {
@@ -846,6 +864,11 @@
     <a id="roomShareLink" href="#" target="_blank">Player link</a>
     <button id="copyRoomLinkBtn" type="button">Copy link</button>
     <button id="closeRoomBtn" type="button">Close room</button>
+    <span id="closeRoomConfirm" class="hidden">
+      Close the room for everyone?
+      <button id="closeRoomYesBtn" type="button">Yes, close it</button>
+      <button id="closeRoomCancelBtn" type="button">Cancel</button>
+    </span>
   </div>
   <div id="lobbyBar"></div>
   <div class="home-actions">
@@ -1154,17 +1177,19 @@ document.getElementById('copyRoomLinkBtn').addEventListener('click', async () =>
   } catch (e) { /* clipboard permissions vary by browser — link is still selectable/visible */ }
 });
 
+// Explicit Yes/Cancel instead of a timed double-click — a timeout-based "click again to
+// confirm" silently expires if the host pauses even a few seconds, and then this
+// destructive action just quietly no-ops with no feedback that it didn't happen.
 document.getElementById('closeRoomBtn').addEventListener('click', () => {
-  const btn = document.getElementById('closeRoomBtn');
-  if (btn.dataset.confirming === '1') {
-    sendWs({ type: 'host_close_room' });
-  } else {
-    btn.dataset.confirming = '1';
-    btn.textContent = 'Confirm?';
-    setTimeout(() => {
-      if (btn.isConnected) { btn.dataset.confirming = '0'; btn.textContent = 'Close room'; }
-    }, 3000);
-  }
+  document.getElementById('closeRoomBtn').classList.add('hidden');
+  document.getElementById('closeRoomConfirm').classList.remove('hidden');
+});
+document.getElementById('closeRoomCancelBtn').addEventListener('click', () => {
+  document.getElementById('closeRoomConfirm').classList.add('hidden');
+  document.getElementById('closeRoomBtn').classList.remove('hidden');
+});
+document.getElementById('closeRoomYesBtn').addEventListener('click', () => {
+  sendWs({ type: 'host_close_room' });
 });
 
 function attachWsMessageHandler(socket) {
