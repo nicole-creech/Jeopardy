@@ -574,6 +574,37 @@ function hostCloseClue(room) {
   broadcastArrivalLog(room);
 }
 
+// Full "start over" for the current game, without closing the room or dropping anyone —
+// clears the board back to fresh, zeroes every score, and resets any live buzz/DD state.
+// Distinct from closing the room: players stay connected, nobody has to rejoin.
+function hostResetGame(room) {
+  clearBuzzTimer(room);
+  room.buzz.clueId = null;
+  room.buzz.open = false;
+  room.buzz.locked = false;
+  room.buzz.winner = null;
+  room.buzz.excludedPlayers = new Set();
+  room.buzz.arrivalLog = [];
+  room.buzz.answerRevealed = false;
+  room.dd.active = false;
+  room.dd.clueId = null;
+  room.dd.playerId = null;
+  room.dd.playerName = null;
+  room.dd.wager = null;
+  room.dd.revealed = false;
+  room.game.usedClueIds = new Set();
+  room.lastScoreAdjust = null;
+  room.teams.forEach(team => { team.score = 0; });
+
+  broadcastPlayers(room, { type: 'buzzer_idle' });
+  broadcastArrivalLog(room);
+  sendGameState(room);
+  broadcastBoardState(room);
+  broadcastTeamsState(room);
+  broadcastAllOwnScores(room);
+  broadcastUndoState(room);
+}
+
 function handlePlayerBuzz(room, client) {
   const ms = Date.now();
   if (!room.buzz.open || room.buzz.locked) {
@@ -773,6 +804,7 @@ wss.on('connection', (ws, req, session, room) => {
       else if (msg.type === 'host_undo_score') hostUndoScore(room);
       else if (msg.type === 'host_remove_team' && typeof msg.playerId === 'string') hostRemoveTeam(room, msg.playerId);
       else if (msg.type === 'host_close_room') closeRoomEntirely(room);
+      else if (msg.type === 'host_reset_game') hostResetGame(room);
       return;
     }
 

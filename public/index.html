@@ -603,8 +603,10 @@
   #boardView { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   #topbar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
     padding: 10px 18px;
     background: var(--navy);
     border-bottom: 1px solid var(--card-border);
@@ -621,6 +623,29 @@
     transition: filter 0.15s ease;
   }
   #topbar button:hover { filter: brightness(1.2); }
+  /* #statusBar is fixed to the top-right corner in every view — this stays clear of it. */
+  #resetGameArea { display: flex; align-items: center; justify-content: flex-end; margin-right: 200px; }
+  #resetGameBtn { background: linear-gradient(180deg, var(--red), var(--red-dark)) !important; }
+  #resetGameConfirm {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--ink);
+  }
+  #resetGameYesBtn, #resetGameCancelBtn {
+    border: none;
+    border-radius: 6px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  #resetGameYesBtn { background: linear-gradient(180deg, var(--red), var(--red-dark)); color: white; }
+  #resetGameCancelBtn { background: #3a4384; color: white; }
+  #resetGameYesBtn:hover, #resetGameCancelBtn:hover { filter: brightness(1.15); }
   #board {
     flex: 1;
     display: grid;
@@ -894,7 +919,14 @@
   <div id="topbar">
     <button id="boardHome">← Menu</button>
     <div class="gtitle" id="boardTitle"></div>
-    <div></div>
+    <div id="resetGameArea">
+      <button id="resetGameBtn" type="button">Reset game</button>
+      <span id="resetGameConfirm" class="hidden">
+        Reset everything?
+        <button id="resetGameYesBtn" type="button">Yes</button>
+        <button id="resetGameCancelBtn" type="button">Cancel</button>
+      </span>
+    </div>
   </div>
   <div id="undoBar" class="hidden">
     <span id="undoBarText"></span>
@@ -1190,6 +1222,25 @@ document.getElementById('closeRoomCancelBtn').addEventListener('click', () => {
 });
 document.getElementById('closeRoomYesBtn').addEventListener('click', () => {
   sendWs({ type: 'host_close_room' });
+});
+
+// Same explicit Yes/Cancel as Close room (no timeout to silently expire on) — clears the
+// board and every score but keeps the room and players connected, unlike Close room.
+document.getElementById('resetGameBtn').addEventListener('click', () => {
+  document.getElementById('resetGameBtn').classList.add('hidden');
+  document.getElementById('resetGameConfirm').classList.remove('hidden');
+});
+document.getElementById('resetGameCancelBtn').addEventListener('click', () => {
+  document.getElementById('resetGameConfirm').classList.add('hidden');
+  document.getElementById('resetGameBtn').classList.remove('hidden');
+});
+document.getElementById('resetGameYesBtn').addEventListener('click', () => {
+  document.getElementById('resetGameConfirm').classList.add('hidden');
+  document.getElementById('resetGameBtn').classList.remove('hidden');
+  if (document.getElementById('overlay').classList.contains('show')) {
+    document.getElementById('closeOverlay').click();
+  }
+  sendWs({ type: 'host_reset_game' });
 });
 
 function attachWsMessageHandler(socket) {
