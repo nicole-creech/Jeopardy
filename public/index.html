@@ -1453,8 +1453,15 @@ document.getElementById('reopenAllBtn').addEventListener('click', (e) => {
 
 // ---------------- Home ----------------
 async function loadGameList() {
-  const res = await fetch('/api/games');
-  const names = await res.json();
+  let names;
+  try {
+    const res = await fetch('/api/games');
+    names = await res.json();
+  } catch (err) {
+    const list = document.getElementById('gameList');
+    list.innerHTML = `<div id="scoreboardEmpty">Could not reach the server to load your games. Refresh to try again.</div>`;
+    return;
+  }
   const list = document.getElementById('gameList');
   list.innerHTML = '';
   names.forEach(name => {
@@ -1715,23 +1722,71 @@ function buildMediaDrop(media, placeholder) {
   return wrap;
 }
 
-document.getElementById('editorHome').addEventListener('click', () => { showView('homeView'); loadGameList(); });
+document.getElementById('editorHome').addEventListener('click', () => { stopDraftAutosave(); showView('homeView'); loadGameList(); });
 document.getElementById('boardHome').addEventListener('click', () => { showView('homeView'); loadGameList(); });
 
 // ---------------- Editor ----------------
 async function editGame(name) {
-  const res = await fetch('/api/games/' + encodeURIComponent(name));
+  let res;
+  try {
+    res = await fetch('/api/games/' + encodeURIComponent(name));
+  } catch (err) {
+    alert(`Could not reach the server to load "${name}". Try again in a moment.\n\n(${err.message})`);
+    return;
+  }
+  if (!res.ok) { alert(`Could not load "${name}" (status ${res.status}).`); return; }
   const game = await res.json();
   openEditor(game, name);
 }
 
+// A local safety net, independent of the server entirely: while the editor is open,
+// periodically snapshot the in-progress game to localStorage. If a save ever fails
+// (dead network, a sleeping free-tier instance, closing the tab by accident) the work
+// is still recoverable from this browser next time the editor opens, not just gone.
+const EDITOR_DRAFT_KEY = 'jeopardy_editor_draft';
+let editorDraftInterval = null;
+function saveDraftSnapshot() {
+  if (!editingGame) return;
+  try {
+    localStorage.setItem(EDITOR_DRAFT_KEY, JSON.stringify({
+      name: document.getElementById('gameNameInput').value,
+      title: document.getElementById('gameTitleInput').value,
+      originalName: editingOriginalName,
+      game: editingGame,
+      savedAt: Date.now()
+    }));
+  } catch (e) { /* storage full/unavailable — draft protection just silently unavailable */ }
+}
+function clearEditorDraft() {
+  try { localStorage.removeItem(EDITOR_DRAFT_KEY); } catch (e) {}
+}
+function startDraftAutosave() {
+  stopDraftAutosave();
+  editorDraftInterval = setInterval(saveDraftSnapshot, 4000);
+}
+function stopDraftAutosave() {
+  if (editorDraftInterval) clearInterval(editorDraftInterval);
+  editorDraftInterval = null;
+}
+
 function openEditor(game, originalName) {
-  editingGame = normalizeGame(JSON.parse(JSON.stringify(game)));
-  editingOriginalName = originalName;
-  document.getElementById('gameTitleInput').value = editingGame.title || '';
-  document.getElementById('gameNameInput').value = originalName || suggestFileName(editingGame.title);
+  let draft = null;
+  try { draft = JSON.parse(localStorage.getItem(EDITOR_DRAFT_KEY) || 'null'); } catch (e) {}
+  if (draft && draft.game && confirm(`You have unsaved changes from a previous editing session ("${draft.name || draft.title || 'untitled'}", saved ${new Date(draft.savedAt).toLocaleString()}). Restore them instead of starting from "${originalName || 'a new game'}"?`)) {
+    editingGame = normalizeGame(draft.game);
+    editingOriginalName = draft.originalName;
+    document.getElementById('gameTitleInput').value = draft.title || '';
+    document.getElementById('gameNameInput').value = draft.name || '';
+  } else {
+    clearEditorDraft();
+    editingGame = normalizeGame(JSON.parse(JSON.stringify(game)));
+    editingOriginalName = originalName;
+    document.getElementById('gameTitleInput').value = editingGame.title || '';
+    document.getElementById('gameNameInput').value = originalName || suggestFileName(editingGame.title);
+  }
   renderEditor();
   showView('editorView');
+  startDraftAutosave();
 }
 
 function suggestFileName(title) {
@@ -1832,29 +1887,63 @@ document.getElementById('gameTitleInput').addEventListener('input', e => {
   editingGame.title = e.target.value;
 });
 
+// A failed save here must NEVER be silent — this is the one action in the whole app
+// where "nothing visibly happened" can mean real, unrecoverable lost work. Every exit
+// path (network failure, server error, timeout) gets an explicit alert.
 async function persistEditingGame() {
   const name = document.getElementById('gameNameInput').value.trim();
   if (!name) { alert('Enter a filename to save as.'); return null; }
   editingGame.title = document.getElementById('gameTitleInput').value || 'Jeopardy';
-  const res = await fetch('/api/games', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, game: editingGame })
-  });
-  const result = await res.json();
+  let res;
+  try {
+    res = await fetch('/api/games', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, game: editingGame })
+    });
+  } catch (err) {
+    // Most likely cause on a free Render instance: it spun down from inactivity and
+    // this request is what's waking it back up — that can take up to a minute. Your
+    // work is still safe in this browser tab (and in the local draft autosave below)
+    // either way, so this is safe to just retry.
+    alert(`Could not reach the server — nothing was saved. If this app has been idle a while, it may just be waking back up; wait a few seconds and try again.\n\n(${err.message})`);
+    return null;
+  }
+  let result;
+  try {
+    result = await res.json();
+  } catch (err) {
+    alert('The server responded, but not with something this app understands — nothing was saved. Try again in a moment.');
+    return null;
+  }
   if (!res.ok) { alert(result.error || 'Failed to save'); return null; }
+  clearEditorDraft();
   return result.name;
 }
 
-document.getElementById('saveGameBtn').addEventListener('click', async () => {
-  const name = await persistEditingGame();
-  if (name) { showView('homeView'); loadGameList(); }
-});
+function withSavingState(btn, fn) {
+  return async () => {
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    try {
+      await fn();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  };
+}
 
-document.getElementById('playFromEditorBtn').addEventListener('click', async () => {
+document.getElementById('saveGameBtn').addEventListener('click', withSavingState(document.getElementById('saveGameBtn'), async () => {
   const name = await persistEditingGame();
-  if (name) playGame(name);
-});
+  if (name) { stopDraftAutosave(); showView('homeView'); loadGameList(); }
+}));
+
+document.getElementById('playFromEditorBtn').addEventListener('click', withSavingState(document.getElementById('playFromEditorBtn'), async () => {
+  const name = await persistEditingGame();
+  if (name) { stopDraftAutosave(); playGame(name); }
+}));
 
 // ---------------- Board ----------------
 // Selecting a game just tells the server which one — the actual board only loads once
